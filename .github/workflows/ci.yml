@@ -41,6 +41,9 @@ jobs:
       - name: Linux implant selftest (crypto backends)
         run: python linux/sh_harvest.py --selftest
 
+      - name: TUI headless frame
+        run: python server/tui.py --demo
+
       - name: Cross-language interop (build C# -> run -> python decrypt)
         if: runner.os == 'Windows'
         run: python test/interop_cs.py

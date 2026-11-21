@@ -261,6 +261,8 @@ def main():
     srv = Server((args.bind, args.port), Handler)
     srv.psk = psk
     term.init()
+    term.print_banner()
+    print()
 
     banner = [
         "%s  %s:%d   loot → %s" % (

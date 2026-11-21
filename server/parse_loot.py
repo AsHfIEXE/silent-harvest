@@ -30,6 +30,7 @@ import tempfile
 import time
 
 import shcrypto
+import term
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -782,6 +783,23 @@ def find_secretsdump():
 
 
 # --------------------------------------------------------------------------
+def colorize_report_line(line):
+    """Style a report line for terminal display."""
+    if line.startswith("==="):
+        return term.s(line, term.C.BOLD, term.C.CYAN)
+    if "RECOVERED" in line or line.startswith("[ok"):
+        return term.s(line, term.C.GREEN)
+    if "ACCESS_DENIED" in line or "FAILED" in line or "unreadable" in line:
+        return term.s(line, term.C.RED)
+    if "app-bound" in line or "not decryptable" in line or "WARN" in line:
+        return term.s(line, term.C.YELLOW)
+    if "BOOTKEY" in line:
+        return term.s(line, term.C.MAGENTA, term.C.BOLD)
+    if line.startswith("    ") or line.startswith("  "):
+        return term.s(line, term.C.GREY)
+    return line
+
+
 def parse_bundle(bundle_dir, psk, redact=False):
     global COOKIE_DIR
     bundle_file = os.path.join(bundle_dir, "bundle.bin")
@@ -853,7 +871,13 @@ def main():
                     help="delete bundles older than N days, then exit")
     ap.add_argument("--shred", default=None, metavar="DIR|all",
                     help="overwrite + delete a bundle dir (or all), then exit")
+    ap.add_argument("--no-color", action="store_true",
+                    help="disable colored output (also honored via NO_COLOR env)")
     args = ap.parse_args()
+
+    if args.no_color:
+        os.environ["NO_COLOR"] = "1"
+    term.init()
 
     psk = shcrypto.get_psk(args.psk)
 
@@ -888,8 +912,11 @@ def main():
             bundle_dir = cands[-1]
         report, rp = parse_bundle(bundle_dir, psk, redact=args.redact)
 
-    print("\n".join(report))
-    print("\nreport -> %s%s" % (rp, "  [REDACTED]" if args.redact else ""))
+    for line in report:
+        print(colorize_report_line(line))
+    print()
+    term.cprint("report → %s%s" % (rp, "  [REDACTED]" if args.redact else ""),
+                term.C.GREEN, term.C.BOLD)
 
 
 if __name__ == "__main__":

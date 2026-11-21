@@ -20,6 +20,14 @@ PSK = "interop-unit-psk"
 
 
 def main():
+    # build.bat rewrites server/psk.txt with the test PSK -- preserve and
+    # restore the operator's real key so tests never corrupt collector state
+    psk_path = os.path.join(ROOT, "server", "psk.txt")
+    backup = None
+    if os.path.exists(psk_path):
+        with open(psk_path, "rb") as f:
+            backup = f.read()
+
     print("[*] building C# implant (console)...")
     r = subprocess.run(["cmd", "/c", "build.bat", "/psk", PSK],
                        cwd=ROOT, capture_output=True, text=True)
@@ -31,10 +39,24 @@ def main():
         raise SystemExit("SECURITY: build log leaked the PSK!")
     print("[ok] build clean, PSK not present in build output")
 
+    def restore_psk():
+        try:
+            if backup is not None:
+                with open(psk_path, "wb") as f:
+                    f.write(backup)
+            else:
+                os.remove(psk_path)
+        except OSError:
+            pass
+
+
     exe = os.path.join(ROOT, "build", "sh_debug.exe")
     out = os.path.join(tempfile.mkdtemp(prefix="sh_interop_"), "out.bin")
-    r = subprocess.run([exe, "--only", "reg", "--out", out],
-                       capture_output=True, text=True, timeout=120)
+    try:
+        r = subprocess.run([exe, "--only", "reg", "--out", out],
+                           capture_output=True, text=True, timeout=120)
+    finally:
+        restore_psk()
     if r.returncode != 0 or not os.path.exists(out):
         print(r.stdout, r.stderr)
         raise SystemExit("implant run failed rc=%s" % r.returncode)

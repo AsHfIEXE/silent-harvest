@@ -528,10 +528,29 @@ SHOW = "\x1b[?25h"
 HOME_CLEAR = "\x1b[H\x1b[J"
 
 
+def render_splash(app):
+    """Banner splash frame shown for a beat on TUI start."""
+    import term as _term
+    cols, _ = shutil.get_terminal_size((124, 30))
+    lines = []
+    for ln in _term.BANNER:
+        pad = max(0, (cols - len(ln)) // 2)
+        lines.append(" " * pad + s(ln, C.CYAN, C.BOLD))
+    lines.append("")
+    sub = "operator console"
+    pad = max(0, (cols - len(sub)) // 2)
+    lines.append(" " * pad + s(sub, C.GREY))
+    lines.append("")
+    return lines
+
+
 def run(app, keys=None):
     keys = keys or KeyInput()
     write = sys.stdout.write
     write(HIDE)
+    write(HOME_CLEAR + "\n".join(render_splash(app)) + "\n")
+    sys.stdout.flush()
+    keys.getkey(1200)  # splash beat; any key skips it
     last_frame = None
     last_scan = 0.0
     try:
@@ -559,6 +578,7 @@ def run(app, keys=None):
 
 
 def demo(app):
+    print("\n".join(render_splash(app)))
     print("\n".join(app.render()))
     if app.bundles:
         app.view = "detail"

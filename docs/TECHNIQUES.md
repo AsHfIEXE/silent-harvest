@@ -133,7 +133,8 @@ Mirroring the source article, from what this tool actually does:
   multi-MB buffer) followed by cross-process `DuplicateHandle` bursts —
   thousands of duplicates in a second is not normal app behavior.
 - **Single large POST with a 6-byte `SHV1` plaintext prefix** to an
-  unexpected host; everything else is opaque ciphertext.
+  unexpected host; everything else is opaque ciphertext. An optional
+  `X-SH-Auth` header may accompany it (constant value, replayable).
 - **DPAPI**: `CryptUnprotectData` on blobs whose plaintext is a 32-byte
   high-entropy key, from a process with no browser lineage.
 

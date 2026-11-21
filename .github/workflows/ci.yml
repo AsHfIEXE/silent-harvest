@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ['3.9', '3.12', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install deps
+        run: pip install cryptography
+
+      - name: Container selftest + PSK rejection
+        run: python server/shcrypto.py
+
+      - name: Malformed-input tests
+        run: python test/test_fuzz.py
+
+      - name: Firefox key4/logins roundtrip
+        run: python test/synth_firefox.py
+
+      - name: Chromium v10 roundtrip
+        run: python test/synth_chromium.py
+
+      - name: Linux implant end-to-end over synthetic home
+        run: python test/synth_linux.py
+
+      - name: Linux implant selftest (crypto backends)
+        run: python linux/sh_harvest.py --selftest
+
+      - name: Cross-language interop (build C# -> run -> python decrypt)
+        if: runner.os == 'Windows'
+        run: python test/interop_cs.py

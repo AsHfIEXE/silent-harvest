@@ -119,10 +119,24 @@ def unpack(blob, psk):
         raise ValueError("AEAD authentication failed (wrong PSK or corrupted data)")
     manifest_len = struct.unpack(">I", plaintext[:4])[0]
     manifest = json.loads(plaintext[4:4 + manifest_len].decode("utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest is not an object")
     blob_parts = plaintext[4 + manifest_len:]
+    plist = manifest.get("parts")
+    if not isinstance(plist, list):
+        raise ValueError("manifest missing parts list")
     parts = {}
-    for p in manifest["parts"]:
-        parts[p["name"]] = blob_parts[p["off"]:p["off"] + p["len"]]
+    for p in plist:
+        if not isinstance(p, dict):
+            raise ValueError("malformed manifest part entry")
+        try:
+            name = p["name"]
+            off, ln = int(p["off"]), int(p["len"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("malformed manifest part entry")
+        if not isinstance(name, str) or off < 0 or ln < 0 or off + ln > len(blob_parts):
+            raise ValueError("part '%s' out of bounds" % name)
+        parts[name] = blob_parts[off:off + ln]
     return manifest, parts
 
 

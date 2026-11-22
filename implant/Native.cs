@@ -208,6 +208,11 @@ namespace SilentHarvest
         public static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
 
         // ---------------------------------------------------------------- bcrypt
+        [DllImport("bcrypt.dll")]
+        public static extern int BCryptDecrypt(IntPtr hKey, byte[] pbInput, int cbInput,
+            ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo, byte[] pbIV, int cbIV,
+            byte[] pbOutput, int cbOutput, out int pcbResult, int dwFlags);
+
         [DllImport("bcrypt.dll", CharSet = CharSet.Unicode)]
         public static extern int BCryptOpenAlgorithmProvider(out IntPtr phAlgorithm,
                                                              string pszAlgId, string pszImplementation,

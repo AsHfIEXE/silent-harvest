@@ -17,3 +17,4 @@ Thumbs.db
 Desktop.ini
 dist/
 .venv/
+tools/cdo/

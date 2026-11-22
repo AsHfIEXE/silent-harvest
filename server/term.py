@@ -95,6 +95,26 @@ def _visible_width(cell):
     return len(re.sub(r"\x1b\[[0-9;]*m", "", str(cell)))
 
 
+def clip(text, width):
+    """Truncate a possibly-ANSI line to a visible width, keeping codes intact."""
+    import re
+    out, vis, i, pending = [], 0, 0, []
+    pat = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+    while i < len(text):
+        m = pat.match(text, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        if vis >= width - 1:
+            out.append(C.RESET + "›")
+            return "".join(out)
+        out.append(text[i])
+        vis += 1
+        i += 1
+    return "".join(out)
+
+
 def table(headers, rows, colors=None, indent=1, sep="  "):
     """Render an aligned table. `colors` optionally maps row-index -> code
     prefix (e.g. C.GREY). Returns a list of lines."""

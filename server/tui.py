@@ -333,8 +333,10 @@ class App:
             "pager": "↑↓ scroll · PgUp/PgDn · g/G top/bottom · q/Esc back",
             "help": "q/Esc close",
         }
-        out.append(s(" " + hints.get(self.view, hints["list"]), C.GREY)[:cols])
-        return out
+        out.append(s(" " + hints.get(self.view, hints["list"]), C.GREY))
+        # clip every line to the terminal width so nothing ever wraps and
+        # scrolls the alt-screen (ANSI-aware truncation)
+        return [term.clip(ln, cols) if ln else ln for ln in out]
 
     def render_list(self, h, cols):
         if not self.bundles:
@@ -363,8 +365,11 @@ class App:
         tbl = term.table(headers, rows)
         out.append(tbl[0])
         for i in range(start, end):
-            marker = s("▸", C.CYAN, C.BOLD) if i == self.sel else " "
-            out.append(marker + tbl[1 + i][1:])
+            marker = "▸" if i == self.sel else " "
+            line = marker + tbl[1 + i][1:]
+            if i == self.sel:
+                line = s(line, C.REVERSE)   # unmissable selection bar
+            out.append(line)
         if end < len(rows):
             out.append(s("  … %d more" % (len(rows) - end), C.GREY))
         return out
@@ -525,7 +530,8 @@ class App:
 # --------------------------------------------------------------------- main
 HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
-HOME_CLEAR = "\x1b[H\x1b[J"
+ALT_ON = "\x1b[?1049h"    # alternate screen buffer: repaints replace, never stack
+ALT_OFF = "\x1b[?1049l"
 
 
 def render_splash(app):
@@ -535,7 +541,7 @@ def render_splash(app):
     lines = []
     for ln in _term.BANNER:
         pad = max(0, (cols - len(ln)) // 2)
-        lines.append(" " * pad + s(ln, C.CYAN, C.BOLD))
+        lines.append(_term.clip(" " * pad + s(ln, C.CYAN, C.BOLD), cols))
     lines.append("")
     sub = "operator console"
     pad = max(0, (cols - len(sub)) // 2)
@@ -547,8 +553,9 @@ def render_splash(app):
 def run(app, keys=None):
     keys = keys or KeyInput()
     write = sys.stdout.write
-    write(HIDE)
-    write(HOME_CLEAR + "\n".join(render_splash(app)) + "\n")
+    # alt screen + hidden cursor: frames replace each other in place
+    write(ALT_ON + HIDE)
+    write("\x1b[H\x1b[J" + "\n".join(render_splash(app)) + "\n")
     sys.stdout.flush()
     keys.getkey(1200)  # splash beat; any key skips it
     last_frame = None
@@ -563,7 +570,7 @@ def run(app, keys=None):
                 last_scan = now
             frame = "\n".join(app.render())
             if frame != last_frame:
-                write(HOME_CLEAR + frame + "\n")
+                write("\x1b[H\x1b[J" + frame + "\n")
                 sys.stdout.flush()
                 last_frame = frame
             k = keys.getkey(200)
@@ -571,8 +578,11 @@ def run(app, keys=None):
                 break
             if k:
                 app.handle_key(k)
+    except KeyboardInterrupt:
+        pass
     finally:
-        write(SHOW + "\x1b[H\x1b[J")
+        # restore the user's screen exactly as it was
+        write(SHOW + ALT_OFF)
         sys.stdout.flush()
         keys.close()
 

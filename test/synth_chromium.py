@@ -110,11 +110,14 @@ def main():
     ]
     web_db = make_db(os.path.join(tmp, "W"), web_schema, web_rows)
 
-    local_state = {"os_crypt": {"encrypted_key":
-                   base64.b64encode(b"DPAPI" + dpapi_protect(key)).decode()}}
-    ls_bytes = json.dumps(local_state).encode()
-    # on non-Windows CI runners DPAPI is unavailable; the Local State part is
-    # optional for the parser (the key arrives as aeskey.bin regardless)
+    # DPAPI exists only on Windows; on Linux CI the Local State part is
+    # skipped entirely (the parser only needs aeskey.bin to decrypt)
+    if sys.platform.startswith("win"):
+        local_state = {"os_crypt": {"encrypted_key":
+                       base64.b64encode(b"DPAPI" + dpapi_protect(key)).decode()}}
+        ls_bytes = json.dumps(local_state).encode()
+    else:
+        ls_bytes = None
 
     parts = {
         "b:test/aeskey.bin": dpapi_protect(key)[0:0] or key,  # key part = raw 32B (implant unwraps on host)

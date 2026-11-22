@@ -18,3 +18,5 @@ Desktop.ini
 dist/
 .venv/
 tools/cdo/
+loot-c2test/
+loot*/

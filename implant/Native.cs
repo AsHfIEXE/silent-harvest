@@ -263,6 +263,20 @@ namespace SilentHarvest
         public static extern int NtQueryObject(IntPtr handle, int cls,
                                                IntPtr info, int len, out int returnLen);
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct IO_STATUS_BLOCK
+        {
+            public uint Status;
+            public IntPtr Information;
+        }
+
+        // offset-addressed read: does not move the FILE_OBJECT's shared
+        // CurrentByteOffset, unlike ReadFile on a seeked handle
+        [DllImport("ntdll.dll")]
+        public static extern int NtReadFile(IntPtr FileHandle, IntPtr Event,
+            IntPtr ApcRoutine, IntPtr ApcContext, ref IO_STATUS_BLOCK IoStatusBlock,
+            byte[] Buffer, uint Length, ref long ByteOffset, IntPtr Key);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
 

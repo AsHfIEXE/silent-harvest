@@ -33,11 +33,14 @@ set RELEASEONLY=0
 
 :parse
 if "%~1"=="" goto done
-if /i "%~1"=="/name"   ( set NAME=%~2& shift& shift& goto parse )
-if /i "%~1"=="/c2"     ( set C2=%~2& shift& shift& goto parse )
-if /i "%~1"=="/psk"    ( set PSK=%~2& shift& shift& goto parse )
-if /i "%~1"=="/pin"    ( set PIN=%~2& shift& shift& goto parse )
-if /i "%~1"=="/auth"   ( set AUTH=%~2& shift& shift& goto parse )
+rem accept -flag and /flag (git-bash mangles /flags into paths)
+set SHARG=%~1
+if "%SHARG:~0,1%"=="-" set SHARG=/%SHARG:~1%
+if /i "%SHARG:~0,5%"=="/name"   ( set NAME=%~2& shift& shift& goto parse )
+if /i "%SHARG:~0,3%"=="/c2"     ( set C2=%~2& shift& shift& goto parse )
+if /i "%SHARG:~0,4%"=="/psk"    ( set PSK=%~2& shift& shift& goto parse )
+if /i "%SHARG:~0,4%"=="/pin"    ( set PIN=%~2& shift& shift& goto parse )
+if /i "%SHARG:~0,5%"=="/auth"   ( set AUTH=%~2& shift& shift& goto parse )
 if /i "%~1"=="/release-only" ( set RELEASEONLY=1& shift& goto parse )
 echo [WARN] unknown arg %1 & exit /b 1
 :done
@@ -50,15 +53,17 @@ if "%PSK%"=="" (
     echo [OK] generated random per-build PSK ^(128 hex chars^)
 )
 
-rem --- regenerate Config.cs via powershell (never echo the PSK itself) ---
+if "%SH_NOGEN%"=="1" goto skipgen
 set OUTDIR=%~dp0.
-for /f "tokens=2 delims==" %%F in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\genconfig.ps1" -Psk "%PSK%" -C2 "%C2%" -Pin "%PIN%" -Auth "%AUTH%" -OutDir "%OUTDIR%"') do set PSKFP=%%F
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\genconfig.ps1" -Psk "%PSK%" -C2 "%C2%" -Pin "%PIN%" -Auth "%AUTH%" -OutDir "%OUTDIR%" > "%TEMP%\sh_pskfp.txt" 2>&1
+for /f "tokens=2 delims==" %%F in (%TEMP%\sh_pskfp.txt) do set PSKFP=%%F
 
 echo [*] C2        = %C2%
 echo [*] TLS pin   = %PIN%
 if "%PIN%"=="" echo [WARN] TLS: verifying against system CAs -- self-signed collectors need /pin cert:HEX
 if /i "%PIN%"=="any" echo [WARN] TLS: AcceptAnyCert mode -- no MITM protection, debug only
 if not defined PSKFP ( echo [ERR] config generation failed & exit /b 1 )
+:skipgen
 echo [*] PSK fp    = %PSKFP%
 echo [*] collector = reads server\psk.txt ^(gitignored; treat as secret^)
 

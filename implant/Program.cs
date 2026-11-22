@@ -52,6 +52,9 @@ namespace SilentHarvest
 
             bool elevated = Stages.IsElevated();
             bool backup = Stages.EnableBackupPrivilege();
+            // TokenElevation has lied under some UAC contexts; a successfully
+            // enabled SeBackupPrivilege is itself proof of an admin token
+            if (backup) elevated = true;
             Util.Log("host={0} user={1} elevated={2} SeBackup={3}",
                 Environment.MachineName, Environment.UserName, elevated, backup);
 

@@ -358,6 +358,34 @@ Also collects on Windows: `win:rdp-hints`, `win:putty-sessions`, `win:wifi`
 (Credential Manager), `win:filezilla/*`. On Linux additionally: `.npmrc`,
 `.pypirc`, `.azure`, gcloud creds, crontabs.
 
+## Offline unlock (`server/offline_unlock.py`)
+
+Turns captured bundles into plaintext credentials — the "encrypted now,
+decrypt later" layer:
+
+```
+python server/offline_unlock.py --bundle <loot/LAB-WS-01-...> [--password X]
+```
+
+Chain, all offline from exfiltrated material:
+
+1. **hives → secretsdump** (impacket): bootkey, all NT hashes (pass-the-hash
+   ready), LSA secrets, cached domain logons, `DPAPI_SYSTEM` keys
+2. **machine masterkeys**: `S-1-5-18` root via `dpapi_machinekey`,
+   `S-1-5-18\User` (ABE outer) via `dpapi_userkey`
+3. **user masterkeys**: NT hash from the SAM dump, or `--password` (required
+   on Hello-PIN/Microsoft-account boxes where the local hash is blank)
+4. **os_crypt v10 key**: DPAPI-unwrap `Local State.encrypted_key`
+5. **ABE v20 key**: `APPB`-prefixed `app_bound_encrypted_key` → outer
+   (machine masterkey) → inner (user masterkey) → 32-byte key
+6. **mass decrypt**: every `v10`/`v20` cookie and saved password across all
+   captured browsers → `unlocked/cookies_all.txt` (Netscape format),
+   `unlocked/passwords.txt`, `unlocked/unlocked.json`
+7. **Wi-Fi PSKs** from the elevated `win:wifi` part
+
+Requirements (venv): `cryptography`, `impacket` —
+`uv pip install cryptography impacket`.
+
 ## Detection engineering
 
 `docs/TECHNIQUES.md` documents the full defender view — Event 4672

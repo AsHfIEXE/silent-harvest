@@ -119,7 +119,7 @@ namespace SilentHarvest
                 Util.Log("SAM rids: {0} ({1})", rids.Count, users);
                 foreach (string rid in rids)
                 {
-                    if (rid.Length != 4) continue; // skip "Names"
+                    if (rid.Length != 8) continue; // "000001F4" style, skip "Names"
                     Dictionary<string, object> r = Util.ReadKeyValues(
                         @"\Registry\Machine\SAM\SAM\Domains\Account\Users\" + rid,
                         new string[] { "F", "V" });

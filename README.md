@@ -17,7 +17,7 @@
 [![.NET](https://img.shields.io/badge/implant-.NET%20Framework%204.x%20%20(in--box%20csc)-512bd4)](#)
 [![Crypto](https://img.shields.io/badge/exfil-AES--256--GCM%20%2B%20HKDF--SHA256-red)](#)
 [![License](https://img.shields.io/badge/license-authorized--research--only-lightgrey)](#license)
-[![Repo](https://img.shields.io/badge/repo-private-important)](#)
+[![Repo](https://img.shields.io/badge/repo-public-important)](#)
 
 Zero-dependency payloads · encrypted dead-drop C2 with tasking & persistence ·
 full offline unlock chain through Chrome 157 app-bound encryption (flag 4)

@@ -53,6 +53,9 @@ jobs:
       - name: TUI headless frame
         run: python server/tui.py --demo
 
+      - name: C2 loop integration (collector + tasking + exec-as-loot)
+        run: python test/test_c2_loop.py
+
       - name: Cross-language interop (build C# -> run -> python decrypt)
         if: runner.os == 'Windows'
         run: python test/interop_cs.py

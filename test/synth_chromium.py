@@ -32,7 +32,11 @@ class DATA_BLOB(ctypes.Structure):
 
 
 def dpapi_protect(data):
-    """CryptProtectData in the CURRENT user context (same as Chrome does)."""
+    """CryptProtectData in the CURRENT user context (same as Chrome does).
+    On non-Windows the synthetic fixture stores the raw key (the parser
+    dispatches on the manifest platform field, not the blob bytes)."""
+    if not sys.platform.startswith("win"):
+        return data
     inbuf = ctypes.create_string_buffer(data, len(data))
     bin_ = DATA_BLOB(len(data), ctypes.cast(inbuf, ctypes.POINTER(ctypes.c_char)))
     bout = DATA_BLOB()

@@ -11,12 +11,21 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
-        python: ['3.9', '3.12', '3.13']
+        python: ['3.12', '3.13']
+        include:
+          # 3.9 is gone from ubuntu-latest (26.04) images; keep that leg on
+          # the older runner where it still exists
+          - os: ubuntu-22.04
+            python: '3.9'
+          - os: windows-latest
+            python: '3.9'
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
@@ -47,3 +56,8 @@ jobs:
       - name: Cross-language interop (build C# -> run -> python decrypt)
         if: runner.os == 'Windows'
         run: python test/interop_cs.py
+
+      - name: Tool scripts parse clean on every platform
+        run: |
+          pip install impacket
+          python -c "import ast,glob;[ast.parse(open(f,encoding='utf-8').read()) for f in glob.glob('server/*.py')+glob.glob('tools/*.py')];print('all server/tools scripts parse clean')"

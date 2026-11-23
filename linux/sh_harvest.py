@@ -433,6 +433,12 @@ def post(blob, url, ua, pin="", auth=""):
 
 # ---------------------------------------------------------------- main
 def selftest():
+    # CI runners use cp1252/outside-UTF8 consoles; the banner + results must
+    # not crash the run before it can report PASS
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     for ln in BANNER:
         print(ln)
     print()

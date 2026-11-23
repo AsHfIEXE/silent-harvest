@@ -1,0 +1,33 @@
+silent-harvest — authorized security testing & research license
+===============================================================
+
+Copyright (c) 2026 the silent-harvest authors. All rights reserved.
+
+This software is offensive security tooling. It harvests credentials,
+session cookies, and secrets from the systems it runs on and exfiltrates
+them to an operator-controlled server.
+
+1. GRANT. You may use, copy, and modify this software ONLY on systems you
+   own or are explicitly and demonstrably authorized to test (your own lab,
+   engagements with written scope, or authorized red-team engagements).
+
+2. RESTRICTIONS. You may NOT use this software against any system lacking
+   such authorization. Unauthorized access to computer systems is illegal
+   under most jurisdictions' law, including but not limited to the U.S.
+   Computer Fraud and Abuse Act, the U.K. Computer Misuse Act, and
+   Bangladesh ICT Act §57.
+
+3. NO WARRANTY. This software is provided "as is", without warranty of any
+   kind, express or implied, including but not limited to the warranties of
+   merchantability, fitness for a particular purpose, and noninfringement.
+   In no event shall the authors be liable for any claim, damages, or other
+   liability arising from, out of, or in connection with the software or
+   its use.
+
+4. REDISTRIBUTION. Redistribution is permitted provided this license and
+   the repository's disclaimer are preserved. The authors make no
+   representation regarding the legality of possession or use of this
+   software in any given jurisdiction — that determination is yours.
+
+IF YOU ARE A DEFENDER: docs/TECHNIQUES.md documents detection guidance for
+every technique implemented here.

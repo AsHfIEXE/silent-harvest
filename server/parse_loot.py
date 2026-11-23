@@ -525,9 +525,14 @@ def firefox_key_from_key4(key4_bytes):
                     iv = b" " * 16
                 k2 = nss_kdf(global_salt, salt, it, klen)
                 pt = aes_cbc_dec(k2, iv, ct2)
-                # decrypted structure: 24-byte 3DES key follows a known filler
+                # plaintext = 24-byte 3DES key + PKCS7 padding -- strip the
+                # padding by value (a length-based 'last 24' grab misfires
+                # whenever the key's leading bytes contain zeros)
+                n = pt[-1] if pt else 0
+                if 1 <= n <= 16 and pt[-n:] == bytes([n]) * n:
+                    pt = pt[:-n]
                 if len(pt) >= 24:
-                    keys.append(pt[:24] if len(pt) == 24 else pt[-24:] if b"\x00" in pt[:4] else pt[:24])
+                    keys.append(pt[:24])
             except Exception:
                 continue
         db.close()

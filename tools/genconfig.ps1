@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)][string]$C2,
     [string]$Pin = "",
     [string]$Auth = "",
-    [Parameter(Mandatory = $true)][string]$OutDir
+    [Parameter(Mandatory = $true)][string]$OutDir,
+    [switch]$WritePskFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,9 +52,13 @@ namespace SilentHarvest
 "@
 Set-Content -Path (Join-Path $OutDir "implant\Config.cs") -Value $cfg -Encoding ascii
 
-# collector side: plaintext psk file, POSIX 0600 where applicable
-$pskPath = Join-Path $OutDir "server\psk.txt"
-Set-Content -Path $pskPath -Value $Psk -Encoding ascii -NoNewline
+# collector side: plaintext psk file, POSIX 0600 where applicable.
+# only written when explicitly requested (random-PSK generation) -- an
+# explicit /psk must never clobber the operator's existing psk.txt
+if ($WritePskFile) {
+    $pskPath = Join-Path $OutDir "server\psk.txt"
+    Set-Content -Path $pskPath -Value $Psk -Encoding ascii -NoNewline
+}
 
 # fingerprint for the build log (no secret material)
 $sha = [System.Security.Cryptography.SHA256]::Create()

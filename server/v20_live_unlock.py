@@ -76,15 +76,24 @@ def dpapi_unprotect(data):
 
 def enable_privilege(name="SeDebugPrivilege"):
     h = wt.HANDLE()
-    adv.OpenProcessToken(k32.GetCurrentProcess(), 0x20 | 0x8,  # ADJUST_PRIVILEGES|QUERY
-                         ctypes.byref(h))
-    luid = LUID()
-    if not adv.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
-        raise OSError("LookupPrivilegeValue failed")
-    tp = TOKEN_PRIVILEGES(1, luid, 0x2)  # SE_PRIVILEGE_ENABLED
-    if not adv.AdjustTokenPrivileges(h, False, ctypes.byref(tp), 0, None, None):
-        raise OSError("AdjustTokenPrivileges failed")
-    k32.CloseHandle(h)
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), 0x20 | 0x8,  # ADJUST_PRIVILEGES|QUERY
+                                 ctypes.byref(h)):
+        raise OSError("OpenProcessToken(self) failed: %d (not elevated?)" %
+                      k32.GetLastError())
+    try:
+        luid = LUID()
+        if not adv.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+            raise OSError("LookupPrivilegeValue failed: %d" % k32.GetLastError())
+        tp = TOKEN_PRIVILEGES(1, luid, 0x2)  # SE_PRIVILEGE_ENABLED
+        k32.SetLastError(0)
+        if not adv.AdjustTokenPrivileges(h, False, ctypes.byref(tp), 0, None, None):
+            raise OSError("AdjustTokenPrivileges failed: %d" % k32.GetLastError())
+        # AdjustTokenPrivileges returns TRUE with ERROR_NOT_ALL_ASSIGNED
+        # when the token simply lacks the privilege -- surface that clearly
+        if k32.GetLastError() == 1300:
+            raise OSError("token lacks %s -- run elevated" % name)
+    finally:
+        k32.CloseHandle(h)
 
 
 class ImpersonateLSASS:

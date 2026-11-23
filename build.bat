@@ -34,13 +34,21 @@ set RELEASEONLY=0
 :parse
 if "%~1"=="" goto done
 rem accept -flag and /flag (git-bash mangles /flags into paths)
+
 set SHARG=%~1
+
 if "%SHARG:~0,1%"=="-" set SHARG=/%SHARG:~1%
+
 if /i "%SHARG:~0,5%"=="/name"   ( set NAME=%~2& shift& shift& goto parse )
+
 if /i "%SHARG:~0,3%"=="/c2"     ( set C2=%~2& shift& shift& goto parse )
+
 if /i "%SHARG:~0,4%"=="/psk"    ( set PSK=%~2& shift& shift& goto parse )
+
 if /i "%SHARG:~0,4%"=="/pin"    ( set PIN=%~2& shift& shift& goto parse )
+
 if /i "%SHARG:~0,5%"=="/auth"   ( set AUTH=%~2& shift& shift& goto parse )
+
 if /i "%~1"=="/release-only" ( set RELEASEONLY=1& shift& goto parse )
 echo [WARN] unknown arg %1 & exit /b 1
 :done
@@ -48,14 +56,18 @@ echo [WARN] unknown arg %1 & exit /b 1
 if not exist build mkdir build
 
 rem --- generate a strong random PSK when none supplied ---
+set GENPSK=0
 if "%PSK%"=="" (
     for /f "delims=" %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')+[guid]::NewGuid().ToString('N')"') do set PSK=%%G%%G
+    set GENPSK=1
     echo [OK] generated random per-build PSK ^(128 hex chars^)
 )
 
 if "%SH_NOGEN%"=="1" goto skipgen
 set OUTDIR=%~dp0.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\genconfig.ps1" -Psk "%PSK%" -C2 "%C2%" -Pin "%PIN%" -Auth "%AUTH%" -OutDir "%OUTDIR%" > "%TEMP%\sh_pskfp.txt" 2>&1
+set GENFLAG=
+if "%GENPSK%"=="1" set GENFLAG=-WritePskFile
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\genconfig.ps1" -Psk "%PSK%" -C2 "%C2%" -Pin "%PIN%" -Auth "%AUTH%" -OutDir "%OUTDIR%" %GENFLAG% > "%TEMP%\sh_pskfp.txt" 2>&1
 for /f "tokens=2 delims==" %%F in (%TEMP%\sh_pskfp.txt) do set PSKFP=%%F
 
 echo [*] C2        = %C2%

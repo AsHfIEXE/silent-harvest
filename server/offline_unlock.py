@@ -64,7 +64,7 @@ FLAG4_XOR = bytes.fromhex("208A6DA7114A44E6B463114BD9DA397E939ADEFEDBF4588117926
 KDBM_HDR = 12   # "KDBM" + version + length precede the 32-byte key material
 
 
-def derive_v20_from_ksp(inner, machine_mk, parts_dir):
+def derive_v20_from_ksp(inner, machine_mk, parts_dir, extra_dirs=None):
     """flag-4 offline chain: KSP file -> CNG key -> CBC -> XOR -> GCM.
     inner = user-DPAPI-decrypted ABE plaintext (needs live session or
     recorded bytes). Returns the 32-byte v20 master key."""
@@ -91,6 +91,14 @@ def derive_v20_from_ksp(inner, machine_mk, parts_dir):
     MAGIC = b"\x01\x00\x00\x00\xd0\x8c\x9d\xdf"
     cands = glob.glob(os.path.join(parts_dir, "win_systemkeys_*")) + \
         glob.glob(os.path.join(parts_dir, "win:mprotect_*"))
+    for d in (extra_dirs or []):
+        if d and os.path.isdir(d):
+            cands += [os.path.join(d, f) for f in os.listdir(d)]
+    # sibling systemkeys/ next to the bundle dir (robocopy convention)
+    sk_sib = os.path.join(os.path.dirname(os.path.abspath(parts_dir)),
+                          "..", "systemkeys")
+    if os.path.isdir(sk_sib):
+        cands += [os.path.join(sk_sib, f) for f in os.listdir(sk_sib)]
     for path in cands:
         base = os.path.basename(path)
         if any(x in base for x in (".log", ".LOG", ".TM", ".blf", "regtrans", "Preferred", "Diagnostic")):
@@ -100,7 +108,7 @@ def derive_v20_from_ksp(inner, machine_mk, parts_dir):
         except Exception:
             continue
         for off in [m.start() for m in _re.finditer(_re.escape(MAGIC), raw)][::-1]:
-            for mk in machine_mk:
+            for mk in machine_mk.values():
                 try:
                     clear = dpapi_blob_decrypt(raw[off:], mk, CNG_ENTROPY)
                 except Exception:
@@ -186,6 +194,12 @@ def main():
                          "DPAPI key; needed on PIN/Hello boxes where the local "
                          "hash is blank)")
     ap.add_argument("--sid", default=None, help="user SID (else auto-detect from protect files)")
+    ap.add_argument("--inner-hex", default=None,
+                    help="recorded user-layer plaintext of the ABE blob (hex) "
+                         "for boxes whose user masterkeys are unavailable")
+    ap.add_argument("--systemkeys-dir", default=None,
+                    help="dir with SystemKeys CNG file copies "
+                         "(also auto-found in bundle parts / sibling 'systemkeys')")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -385,13 +399,43 @@ def main():
                         break
                 except Exception:
                     continue
+            if inner is None and args.inner_hex:
+                try:
+                    inner = bytes.fromhex(args.inner_hex.strip())
+                    report.append(f"[abe] {name}: using --inner-hex "
+                                  f"({len(inner)} B recorded inner)")
+                except ValueError:
+                    report.append(f"[abe] {name}: bad --inner-hex")
+                    continue
             if inner is None:
                 report.append(f"[abe] {name}: inner (user) layer failed -- needs "
-                              f"--password (Microsoft account / Hello PIN box)")
+                              f"--password, --inner-hex, or a live-session unwrap")
                 continue
-            abe_key = inner[:32]
+            # flag byte decides the scheme: 1/2 unwrap directly, 3/4 need the
+            # CNG SystemKeys chain. inner[:32] alone is only right for
+            # pre-137 non-Chrome builds.
+            ksp_dirs = [parts_dir]
+            if args.systemkeys_dir:
+                ksp_dirs.append(args.systemkeys_dir)
+            try:
+                flag = inner[4 + struct.unpack("<I", inner[:4])[0] + 4]
+            except Exception:
+                flag = 0
+            abe_key = derive_v20_from_ksp(inner, machine_mk, parts_dir,
+                                          extra_dirs=ksp_dirs)
+            if abe_key is None:
+                # pre-137 / other browsers: inner may be the raw key
+                abe_key = inner[:32] if len(inner) >= 32 else None
+                if abe_key:
+                    report.append(f"[abe] {name}: raw-key fallback "
+                                  f"(flag byte {flag})")
+            if abe_key is None:
+                report.append(f"[abe] {name}: flag {flag} derivation failed -- "
+                              f"provide --systemkeys-dir with the CNG key files")
+                continue
             report.append(f"[abe] {name}: APP-BOUND KEY RECOVERED "
-                          f"({abe_key.hex()[:16]}...)")
+                          f"(flag {flag}, {abe_key.hex()[:16]}...)")
+            open(os.path.join(outdir, "v20_master_key.bin"), "wb").write(abe_key)
             break
         except Exception as e:
             report.append(f"[abe] {name}: {e}")

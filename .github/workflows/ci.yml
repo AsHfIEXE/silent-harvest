@@ -56,6 +56,9 @@ jobs:
       - name: TUI keyflow (filter/sort/hosts/tasking)
         run: python test/test_tui_keys.py
 
+      - name: Persistence layering (sandboxed)
+        run: python test/test_persist_linux.py
+
       - name: C2 loop integration (collector + tasking + exec-as-loot)
         run: python test/test_c2_loop.py
 

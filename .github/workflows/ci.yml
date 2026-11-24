@@ -53,6 +53,9 @@ jobs:
       - name: TUI headless frame
         run: python server/tui.py --demo
 
+      - name: TUI keyflow (filter/sort/hosts/tasking)
+        run: python test/test_tui_keys.py
+
       - name: C2 loop integration (collector + tasking + exec-as-loot)
         run: python test/test_c2_loop.py
 

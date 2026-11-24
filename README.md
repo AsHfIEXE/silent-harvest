@@ -12,6 +12,7 @@
 **Cross-platform credential & cookie harvesting toolkit — stealthy by design.**
 
 [![CI](https://github.com/AsHfIEXE/silent-harvest/actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v1.1.0-2ea44f)](../../releases/tag/v1.1.0)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)](#)
 [![Python](https://img.shields.io/badge/python-3.9%20%7C%203.12%20%7C%203.13-3776ab)](#)
 [![.NET](https://img.shields.io/badge/implant-.NET%20Framework%204.x%20%20(in--box%20csc)-512bd4)](#)

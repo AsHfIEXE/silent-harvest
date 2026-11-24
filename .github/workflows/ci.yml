@@ -59,6 +59,9 @@ jobs:
       - name: Persistence layering (sandboxed)
         run: python test/test_persist_linux.py
 
+      - name: Payload generator (structure + embedded cradle)
+        run: python test/test_payload_gen.py
+
       - name: C2 loop integration (collector + tasking + exec-as-loot)
         run: python test/test_c2_loop.py
 

